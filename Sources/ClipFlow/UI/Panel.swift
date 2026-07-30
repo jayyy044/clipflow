@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+extension Notification.Name {
+  static let clipFlowPanelDidOpen = Self("clipFlowPanelDidOpen")
+}
+
 /// Spotlight-style floating panel that shows without stealing focus from the app
 /// you were typing in — that app has to stay frontmost so Phase 4 can paste back
 /// into it.
@@ -45,6 +49,10 @@ final class Panel<Content: View>: NSPanel {
   }
 
   func open(below statusButton: NSStatusBarButton?) {
+    // Rows keep whatever relative timestamp they rendered with, because SwiftUI
+    // skips re-rendering rows whose data hasn't changed. Announcing the open lets
+    // the list re-date itself instead of showing "now" for a minute-old item.
+    NotificationCenter.default.post(name: .clipFlowPanelDidOpen, object: nil)
     setFrameOrigin(origin(below: statusButton))
     // orderFrontRegardless, not makeKeyAndOrderFront — the latter would activate
     // ClipFlow and we'd lose the frontmost app we need to paste into.

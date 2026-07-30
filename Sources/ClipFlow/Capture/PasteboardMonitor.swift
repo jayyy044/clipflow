@@ -58,9 +58,12 @@ final class PasteboardMonitor {
     timer = nil
   }
 
-  /// Call immediately after writing to the pasteboard ourselves.
-  func ignoreNextChange() {
-    ignoredChangeCount = pasteboard.changeCount + 1
+  /// Call after writing to the pasteboard ourselves, passing the change count
+  /// the write produced. Takes the observed value rather than guessing at
+  /// `current + 1`, because how many times a write bumps the counter depends on
+  /// how it was performed.
+  func ignore(changeCount: Int) {
+    ignoredChangeCount = changeCount
   }
 
   private func tick() {

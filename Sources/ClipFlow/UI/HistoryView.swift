@@ -33,6 +33,10 @@ struct HistoryView: View {
 
   @State private var history = History.shared
   @State private var selection: Int64?
+  /// Reference point the rows date themselves against, refreshed each time the
+  /// panel opens. Explicit state rather than a `Date.now` buried in each row, so
+  /// SwiftUI can actually see it change and re-render.
+  @State private var now = Date.now
 
   var body: some View {
     VStack(spacing: 0) {
@@ -48,14 +52,32 @@ struct HistoryView: View {
       onClose()
       return .handled
     }
+    .onKeyPress(.return) {
+      guard let selection else { return .ignored }
+      copy(selection)
+      return .handled
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .clipFlowPanelDidOpen)) { _ in
+      now = .now
+    }
+  }
+
+  private func copy(_ itemID: Int64) {
+    Clipboard.copy(itemID: itemID)
+    onClose()
   }
 
   private var list: some View {
     // `selection` plus a focused List is what makes the arrow keys work; there
     // is no manual key handling here.
     List(history.items, selection: $selection) { item in
-      ItemRow(item: item)
+      ItemRow(item: item, now: now)
         .tag(item.id)
+        // Single click, not double: picking a clipboard entry is the whole point
+        // of the panel being open, so there is nothing else a click would mean.
+        // contentShape makes the blank space in the row clickable too.
+        .contentShape(.rect)
+        .onTapGesture { copy(item.id) }
     }
     .listStyle(.sidebar)
     // onAppear alone isn't enough: the observation often delivers rows after the
@@ -83,6 +105,7 @@ struct HistoryView: View {
 
 struct ItemRow: View {
   let item: ItemSummary
+  let now: Date
 
   var body: some View {
     HStack(spacing: 8) {
@@ -96,7 +119,7 @@ struct ItemRow: View {
 
       Spacer(minLength: 8)
 
-      Text(Self.age(of: item.copiedAtDate))
+      Text(Self.age(of: item.lastActivityDate, relativeTo: now))
         .font(.caption)
         .foregroundStyle(.secondary)
         .fixedSize()
@@ -110,10 +133,12 @@ struct ItemRow: View {
   ///
   /// The clamp matters — anything under a second formats as the nonsensical
   /// "in 0s", which is what showed up on freshly copied rows.
-  static func age(of date: Date) -> String {
-    let elapsed = Date.now.timeIntervalSince(date)
+  static func age(of date: Date, relativeTo now: Date) -> String {
+    let elapsed = now.timeIntervalSince(date)
     guard elapsed >= 1 else { return "now" }
-    return date.formatted(.relative(presentation: .numeric, unitsStyle: .narrow))
+    return date.formatted(
+      .relative(presentation: .numeric, unitsStyle: .narrow).locale(.autoupdatingCurrent)
+    )
   }
 }
 

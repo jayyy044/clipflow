@@ -88,7 +88,12 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
     case lastUsedAt = "last_used_at"
   }
 
-  var copiedAtDate: Date { Date(timeIntervalSince1970: Double(copiedAt) / 1000) }
+  /// The timestamp the row is *sorted* by, and therefore the one it must
+  /// display. Showing `copied_at` while ordering by this is what put a "53m ago"
+  /// row at the top of the list.
+  var lastActivityDate: Date {
+    Date(timeIntervalSince1970: Double(max(copiedAt, lastUsedAt ?? copiedAt)) / 1000)
+  }
 
   static func recent(limit: Int = 500) -> SQLRequest<ItemSummary> {
     """

@@ -42,23 +42,65 @@ enum Database {
       try db.create(index: "idx_items_hash", on: "items", columns: ["content_hash"])
     }
 
+    // FR-1.3 only deduped against the newest row, so copying A, then B, then A
+    // again produced two rows for A. Dedupe is now global: the same content can
+    // only ever occupy one row, whenever it was last seen.
+    migrator.registerMigration("v2_global_dedupe") { db in
+      // Collapse existing duplicates before the unique index can reject them.
+      // Carry the newest activity onto the survivor so nothing moves backwards.
+      try db.execute(sql: """
+        UPDATE items SET last_used_at = (
+          SELECT MAX(COALESCE(o.last_used_at, o.copied_at))
+          FROM items o WHERE o.content_hash = items.content_hash
+        )
+        WHERE content_hash IN (
+          SELECT content_hash FROM items GROUP BY content_hash HAVING COUNT(*) > 1
+        )
+        """)
+      // Keep the earliest row of each group, so copied_at stays "first seen".
+      try db.execute(sql: """
+        DELETE FROM items WHERE id NOT IN (SELECT MIN(id) FROM items GROUP BY content_hash)
+        """)
+
+      try db.drop(index: "idx_items_hash")
+      try db.create(index: "idx_items_hash", on: "items", columns: ["content_hash"], unique: true)
+    }
+
     return migrator
   }
 }
 
 enum ItemRepository {
-  /// Insert, or bump the existing row when the same content is already the newest
-  /// entry. Returns nothing — the UI observes the table rather than the return value.
+  /// Insert, or bump whichever existing row already holds this content —
+  /// anywhere in the history, not just the newest one. Bumping `last_used_at`
+  /// floats it back to the top, since ordering is max(copied_at, last_used_at).
   static func save(_ item: Item) {
     var item = item
     try? Database.shared.write { db in
-      if var newest = try Item.recent(limit: 1).fetchOne(db),
-         newest.contentHash == item.contentHash {
-        newest.lastUsedAt = item.copiedAt
-        try newest.update(db)
+      if var existing = try Item
+        .filter(Column("content_hash") == item.contentHash)
+        .fetchOne(db)
+      {
+        existing.lastUsedAt = item.copiedAt
+        try existing.update(db)
         return
       }
       try item.insert(db)
+    }
+  }
+
+  /// Fetches the full payload for one item. The list deliberately never loads
+  /// `content`, so this is where it gets read — one row, on demand.
+  static func content(id: Int64) -> String? {
+    try? Database.shared.read { db in
+      try Item.withID(id).fetchOne(db)?.content
+    }
+  }
+
+  static func markUsed(id: Int64) {
+    let now = Int64(Date().timeIntervalSince1970 * 1000)
+    try? Database.shared.write { db in
+      try db.execute(sql: "UPDATE items SET last_used_at = ? WHERE id = ?", arguments: [now, id])
     }
   }
 

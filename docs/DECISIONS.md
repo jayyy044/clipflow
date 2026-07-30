@@ -93,6 +93,29 @@ match renders twice.
 
 ---
 
+## D-5b: Dedupe is global, superseding FR-1.3
+
+FR-1.3 dedupes only against "the most recent item". That means copying A, then B,
+then A again inserts a second row for A, because A was not adjacent. Observed in
+real use within an hour of the list existing.
+
+Dedupe is now global on `content_hash`: identical content can only ever occupy
+one row, and re-copying it bumps `last_used_at` so it floats back to the top.
+Enforced by a UNIQUE index, not just by the repository check, so the invariant
+holds even if a future code path forgets.
+
+`copied_at` stays "first seen" and is never rewritten. Ordering and display both
+use `max(copied_at, last_used_at)`. Migration `v2_global_dedupe` collapses
+pre-existing duplicates, keeping the earliest row and carrying the newest
+activity onto it.
+
+Consequence worth knowing: the history can no longer show that you copied the
+same string twice. That is the point — the PRD's own non-goals reject anything
+that turns retrieval into filing, and a list with three copies of the same commit
+hash is worse at retrieval, not better.
+
+---
+
 ## D-6: The memory budget is `phys_footprint`, not RSS
 
 NFR "idle resident memory < 60 MB" is ambiguous, and the two readings disagree
@@ -112,8 +135,10 @@ Read literally as RSS, the budget rules out SwiftUI entirely — linking it at a
 maps tens of MB of shared framework pages. So the budget is `phys_footprint`,
 measured with `footprint -p $(pgrep -x ClipFlow)`.
 
-Provisional: recorded with reasoning rather than agreed. Revisit if the intent
-really was RSS, because that changes the UI framework choice, not the code.
+Settled. For scale, Apple's own ControlCenter — a menu bar utility — measures
+105 MB RSS / 77 MB footprint, so it fails a 60 MB budget on either reading. No
+SwiftUI app shows a small RSS. ClipFlow at 21 MB sits at a third of budget,
+which is where the headroom for thumbnails and the OCR queue comes from.
 
 ---
 
