@@ -29,9 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     // Template images follow the menu bar's light/dark appearance for free.
     statusItem.button?.image?.isTemplate = true
-    statusItem.button?.action = #selector(toggle)
+    statusItem.button?.action = #selector(statusItemClicked)
     statusItem.button?.target = self
-    statusItem.menu = nil
+    statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
     panel = Panel(size: NSSize(width: 420, height: 400), onClose: { [weak self] in
       self?.statusItem.button?.isHighlighted = false
@@ -87,8 +87,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  @objc private func toggle() {
+  @objc private func statusItemClicked() {
+    // Right-click opens the menu; left-click opens the history. Assigning
+    // `statusItem.menu` instead would make the menu appear on *both*, costing the
+    // one-click path to the thing the app is for.
+    if NSApp.currentEvent?.type == .rightMouseUp {
+      showMenu()
+    } else {
+      toggle()
+    }
+  }
+
+  private func toggle() {
     panel.toggle(below: statusItem.button)
     statusItem.button?.isHighlighted = panel.isPresented
+  }
+
+  private func showMenu() {
+    panel.close()
+
+    let menu = NSMenu()
+    let clear = NSMenuItem(title: "Clear History…", action: #selector(clearHistory), keyEquivalent: "")
+    clear.target = self
+    menu.addItem(clear)
+    menu.addItem(.separator())
+    let quit = NSMenuItem(title: "Quit ClipFlow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    menu.addItem(quit)
+
+    // Attaching, popping, then detaching: leaving `menu` set would hijack
+    // left-click too.
+    statusItem.menu = menu
+    statusItem.button?.performClick(nil)
+    statusItem.menu = nil
+  }
+
+  /// FR-7.5. Irreversible and unbounded, so it confirms — and says how much is
+  /// about to go, because "clear history" reads very differently at 3 items than
+  /// at 900.
+  @objc private func clearHistory() {
+    let count = History.shared.items.count
+
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Clear all clipboard history?"
+    alert.informativeText = count == 1
+      ? "1 item and any stored images will be permanently deleted."
+      : "\(count) items and any stored images will be permanently deleted."
+    alert.addButton(withTitle: "Clear")
+    alert.addButton(withTitle: "Cancel")
+    alert.buttons.first?.hasDestructiveAction = true
+
+    // An .accessory app has no windows to bring forward, so without this the
+    // alert can open behind whatever the user was looking at.
+    NSApp.activate(ignoringOtherApps: true)
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    ItemRepository.deleteAll()
   }
 }

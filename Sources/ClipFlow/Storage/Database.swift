@@ -102,6 +102,57 @@ enum Database {
       try db.create(index: "idx_items_hash", on: "items", columns: ["content_hash"], unique: true)
     }
 
+    // `ocr_text` is created empty and stays empty until Phase 7 fills it. It is
+    // here now because an external-content FTS5 table's columns are fixed at
+    // creation: adding OCR later would mean dropping the table and rebuilding
+    // all three triggers. One extra column now costs nothing.
+    migrator.registerMigration("v4_search") { db in
+      try db.alter(table: "items") { t in
+        t.add(column: "ocr_text", .text)
+      }
+
+      // content='items' keeps the text in `items` rather than duplicating it into
+      // the index. remove_diacritics 2 so "café" is findable as "cafe".
+      try db.execute(sql: """
+        CREATE VIRTUAL TABLE items_fts USING fts5(
+          content,
+          ocr_text,
+          content='items',
+          content_rowid='id',
+          tokenize='unicode61 remove_diacritics 2'
+        )
+        """)
+
+      // External-content tables are not maintained automatically, and delete and
+      // update must use the special 'delete' command carrying the OLD values.
+      // Ordinary DELETE triggers leave stale postings behind and search starts
+      // returning rows that no longer exist (DECISIONS S-8).
+      try db.execute(sql: """
+        CREATE TRIGGER items_fts_ai AFTER INSERT ON items BEGIN
+          INSERT INTO items_fts(rowid, content, ocr_text)
+          VALUES (new.id, new.content, new.ocr_text);
+        END
+        """)
+      try db.execute(sql: """
+        CREATE TRIGGER items_fts_ad AFTER DELETE ON items BEGIN
+          INSERT INTO items_fts(items_fts, rowid, content, ocr_text)
+          VALUES ('delete', old.id, old.content, old.ocr_text);
+        END
+        """)
+      try db.execute(sql: """
+        CREATE TRIGGER items_fts_au AFTER UPDATE ON items BEGIN
+          INSERT INTO items_fts(items_fts, rowid, content, ocr_text)
+          VALUES ('delete', old.id, old.content, old.ocr_text);
+          INSERT INTO items_fts(rowid, content, ocr_text)
+          VALUES (new.id, new.content, new.ocr_text);
+        END
+        """)
+
+      // The triggers only fire from here on, so everything already stored has to
+      // be indexed once.
+      try db.execute(sql: "INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+    }
+
     return migrator
   }
 }
@@ -164,8 +215,24 @@ enum ItemRepository {
     }
   }
 
-  // FR-7.5's clear-history actions land in Phase 9 with the Settings pane that
-  // calls them. Whatever implements them has to delete the image files too, not
-  // only the rows — ImageStore.sweepOrphans(referencedBy:) already does exactly
-  // that and the launch sweep is the safety net either way.
+  /// Deletes one item and any file it owned.
+  ///
+  /// The sweep runs after the row is gone, so it sees the real remaining
+  /// references — deleting the file first would strand the row if the write
+  /// failed, and computing the reference set first would race the delete.
+  static func delete(id: Int64) {
+    try? Database.shared.write { db in
+      try db.execute(sql: "DELETE FROM items WHERE id = ?", arguments: [id])
+    }
+    ImageStore.sweepOrphans(referencedBy: imagePaths())
+  }
+
+  /// FR-7.5's destructive clear. Callers are responsible for confirming first.
+  static func deleteAll() {
+    try? Database.shared.write { db in
+      try db.execute(sql: "DELETE FROM items")
+    }
+    // With no rows left, every file in the directory is an orphan.
+    ImageStore.sweepOrphans(referencedBy: [])
+  }
 }
