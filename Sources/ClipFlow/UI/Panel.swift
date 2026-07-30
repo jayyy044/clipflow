@@ -49,6 +49,10 @@ final class Panel<Content: View>: NSPanel {
   }
 
   func open(below statusButton: NSStatusBarButton?) {
+    // First statement in the method, deliberately: DECISIONS S-12 wants the
+    // frontmost app read before anything of ours is on screen. Move this below
+    // orderFrontRegardless and paste starts landing in ClipFlow.
+    Paster.captureTargetApp()
     // Rows keep whatever relative timestamp they rendered with, because SwiftUI
     // skips re-rendering rows whose data hasn't changed. Announcing the open lets
     // the list re-date itself instead of showing "now" for a minute-old item.

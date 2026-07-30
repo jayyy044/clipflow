@@ -55,6 +55,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // FR-4.5: a queue interrupted by quitting left rows at 'pending'.
     OCRQueue.shared.wake()
     enableLaunchAtLogin()
+    // FR-5.4: paste degrading to copy is a silent difference, and the grant can
+    // vanish on its own (a rebuild with a different signature, a macOS update).
+    // One line at launch makes "why did it stop pasting" answerable from the log.
+    NSLog("ClipFlow: accessibility \(Paster.isTrusted ? "granted, paste enabled" : "not granted, paste falls back to copy")")
   }
 
   /// A clipboard manager that isn't running has lost history you can never get
@@ -112,6 +116,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     panel.close()
 
     let menu = NSMenu()
+    // FR-5.4's explanation alert fires once and then never again, so without a
+    // standing entry there is no way back to the permission after dismissing it.
+    // Hidden when granted — a permanently visible "enable" for something already
+    // enabled reads as broken.
+    if !Paster.isTrusted {
+      let enable = NSMenuItem(title: "Enable Pasting…", action: #selector(enablePasting), keyEquivalent: "")
+      enable.target = self
+      menu.addItem(enable)
+      menu.addItem(.separator())
+    }
     let clear = NSMenuItem(title: "Clear History…", action: #selector(clearHistory), keyEquivalent: "")
     clear.target = self
     menu.addItem(clear)
@@ -124,6 +138,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     statusItem.menu = menu
     statusItem.button?.performClick(nil)
     statusItem.menu = nil
+  }
+
+  @MainActor @objc private func enablePasting() {
+    Paster.openAccessibilitySettings()
   }
 
   /// FR-7.5. Irreversible and unbounded, so it confirms — and says how much is

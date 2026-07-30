@@ -362,6 +362,63 @@ because a locally built app is never quarantined.
 
 ---
 
+## D-12: Paste timing, and what could not be measured
+
+Phase 4's synthetic Cmd+V. Three things were settled here.
+
+**`.nonactivatingPanel` really does not steal frontmost — verified, not assumed.**
+S-12 depends on it and the assumption was worth checking. A panel built with
+ClipFlow's exact configuration (`.nonactivatingPanel`, `.screenSaver` level,
+`orderFrontRegardless()` then `makeKey()`), opened 10 times over another app:
+
+```
+panel is key window          10/10 yes
+our app active               10/10 no
+NSWorkspace.frontmostApplication while open   unchanged, 10/10
+```
+
+So the panel takes key focus without taking activation. Capturing the frontmost
+app before the open is still required, because the status item click path can
+leave ClipFlow itself frontmost, and because "verified today" is not "guaranteed
+by the API".
+
+**The settle delay is 60 ms, sized against the window server, not a guess.**
+HP-2's "brief moment" is the target app waiting for our panel to actually go
+away. Timing `close()` to the window leaving `CGWindowListCopyWindowInfo`, over
+the same 10 opens:
+
+```
+min 2.0 ms    mean 20.1 ms    max 46.8 ms
+```
+
+60 ms clears every observation and is under two frames of perceptible lag. Before
+this the code waits for the captured app to be frontmost again (polled at 10 ms,
+250 ms cap), which in the normal flow costs nothing because frontmost never
+changed.
+
+**What was not verified: an actual paste into an actual app.** ClipFlow has no
+Accessibility grant yet — `tccd` reports `kTCCServiceAccessibility ... Denied
+(System Set)` for `com.jayyy044.clipflow` — so the only code path that can run
+today is the copy-only fallback. A separate harness that does have the grant was
+built to measure the delay end to end against a scratch TextEdit document, and
+its synthetic events were silently discarded (plain typing did not reach TextEdit
+either), so it proved nothing about timing. 60 ms is therefore an upper bound on
+a measured *proxy*, not a measured success rate.
+
+That is why `pasteSettleMilliseconds` exists in UserDefaults: being early fails
+silently — the keystroke is eaten, the panel is already gone, and nothing says
+why. Tuning it must not require a rebuild.
+
+**Paste-as-plain-text is currently the same code path as paste.** FR-5.2 says
+Option+Shift+Enter strips RTF. Nothing stores RTF: text items have `content` and
+no `rtf_data` column, so for a text item the two produce byte-identical
+pasteboard contents. The flag is threaded into `Clipboard.copy` anyway so the RTF
+representation has exactly one place to be added, and the binding exists so the
+behaviour does not have to be discovered later. For image items the flag is
+ignored — PNG is written either way.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a

@@ -79,16 +79,18 @@ struct HistoryView: View {
       onClose()
       return .handled
     }
-    .onKeyPress(.return) {
+    // `keys:` rather than the single-key overload, because that one hands back no
+    // modifiers and FR-5.2 puts three different actions on Return.
+    .onKeyPress(keys: [.return]) { press in
       guard let selection else { return .ignored }
-      copy(selection)
+      perform(selection, modifiers: press.modifiers)
       return .handled
     }
     // With nothing preselected, the arrow keys have no starting point, so the
     // first press has to create one. Once a row is selected the List handles
     // subsequent presses itself, hence .ignored.
-    .onKeyPress(.downArrow) { enterList(from: .first) }
-    .onKeyPress(.upArrow) { enterList(from: .last) }
+    .onKeyPress(.downArrow) { move(1) }
+    .onKeyPress(.upArrow) { move(-1) }
     // Option is required: focus lives in the search field, so plain Delete has to
     // keep editing the query (FR-5.2).
     .onKeyPress(keys: [.delete, .deleteForward]) { press in
@@ -116,9 +118,22 @@ struct HistoryView: View {
         // never sees it. Falling back to the first row is what makes the fast
         // path work: type a few characters, press Enter, done (G2) — without it
         // you would have to arrow into the list first.
+        //
+        // onSubmit alone is not enough: it fires only for an *unmodified*
+        // Return. The field eats Option+Return and reports nothing, so
+        // Option+Enter did nothing at all until this handler existed —
+        // measured, not guessed. onKeyPress on the focused field sees the event
+        // before the field's own handling, which is the only place a modified
+        // Return is still interceptable.
+        .onKeyPress(keys: [.return], phases: .down) { press in
+          guard !press.modifiers.isEmpty else { return .ignored }  // plain Return stays with onSubmit
+          guard let target = selection ?? history.items.first?.id else { return .ignored }
+          perform(target, modifiers: press.modifiers)
+          return .handled
+        }
         .onSubmit {
           guard let target = selection ?? history.items.first?.id else { return }
-          copy(target)
+          perform(target, modifiers: Self.modifiers(from: NSEvent.modifierFlags))
         }
       if !query.isEmpty {
         Button {
@@ -141,11 +156,29 @@ struct HistoryView: View {
     }
   }
 
-  private enum ListEnd { case first, last }
 
-  private func enterList(from end: ListEnd) -> KeyPress.Result {
-    guard selection == nil else { return .ignored }
-    selection = end == .first ? history.items.first?.id : history.items.last?.id
+  /// Moves the selection through the list ourselves rather than letting `List`
+  /// do it.
+  ///
+  /// `List` only handles arrow keys when it holds focus, and focus has to stay
+  /// in the search field so typing keeps filtering (FR-6.5). Deferring to the
+  /// List meant the first press selected a row and every press after it did
+  /// nothing.
+  private func move(_ step: Int) -> KeyPress.Result {
+    guard !history.items.isEmpty else { return .ignored }
+
+    guard let current = selection,
+          let index = history.items.firstIndex(where: { $0.id == current })
+    else {
+      // Nothing selected yet: Down enters at the top, Up at the bottom.
+      selection = step > 0 ? history.items.first?.id : history.items.last?.id
+      return .handled
+    }
+
+    // Clamped, not wrapped — running off the end of a list of copied items and
+    // silently reappearing at the other end loses your place.
+    let next = min(max(index + step, 0), history.items.count - 1)
+    selection = history.items[next].id
     return .handled
   }
 
@@ -168,6 +201,35 @@ struct HistoryView: View {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { onClose() }
   }
 
+  /// FR-5.2's action table for Return. Option decides copy versus paste and
+  /// Shift decides plain text, read off the key press for the same reason
+  /// Option+Delete is bound that way: focus lives in the search field, so an
+  /// unmodified Return has to stay available for the fast path.
+  private func perform(_ itemID: Int64, modifiers: EventModifiers) {
+    guard modifiers.contains(.option) else {
+      copy(itemID)
+      return
+    }
+    paste(itemID, plainText: modifiers.contains(.shift))
+  }
+
+  private func paste(_ itemID: Int64, plainText: Bool) {
+    selection = itemID
+    Clipboard.copy(itemID: itemID, plainText: plainText)
+    // Closed immediately, without copy()'s confirmation beat: the text arriving
+    // in the other app is the confirmation, and PRD HP-2's timing problem only
+    // starts once the panel is gone.
+    onClose()
+    Paster.paste()
+  }
+
+  private static func modifiers(from flags: NSEvent.ModifierFlags) -> EventModifiers {
+    var modifiers = EventModifiers()
+    if flags.contains(.option) { modifiers.insert(.option) }
+    if flags.contains(.shift) { modifiers.insert(.shift) }
+    return modifiers
+  }
+
   private var list: some View {
     // `selection` plus a focused List is what makes the arrow keys work; there
     // is no manual key handling here.
@@ -183,6 +245,8 @@ struct HistoryView: View {
         // anyone using the mouse.
         .contextMenu {
           Button("Copy") { copy(item.id) }
+          Button("Paste") { paste(item.id, plainText: false) }
+          Button("Paste as Plain Text") { paste(item.id, plainText: true) }
           Divider()
           Button("Delete", role: .destructive) { delete(item.id) }
         }

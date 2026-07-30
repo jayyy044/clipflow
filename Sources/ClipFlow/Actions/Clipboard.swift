@@ -1,15 +1,16 @@
 import AppKit
 
 enum Clipboard {
-  /// Puts an item back on the system clipboard, ready for the user to paste with
-  /// Cmd+V themselves.
+  /// Puts an item back on the system clipboard. `Paster.paste()` is what then
+  /// makes another app take it; on its own this is FR-5.2's Enter action, and
+  /// FR-5.4's copy-only fallback when pasting isn't permitted.
   ///
-  /// Deliberately does not synthesize the Cmd+V keystroke. That needs
-  /// Accessibility permission, which needs a stable code signing identity, and
-  /// neither is worth blocking on — FR-5.4 treats copy-only as a legitimate
-  /// state, not a half-built one.
+  /// `plainText` is FR-5.2's Option+Shift+Enter. It currently changes nothing:
+  /// text items store only `content`, there is no `rtf_data` column, so there is
+  /// no formatting to strip. Threaded here rather than branched at the call site
+  /// so the RTF representation has exactly one place to be added later.
   @MainActor
-  static func copy(itemID: Int64) {
+  static func copy(itemID: Int64, plainText: Bool = false) {
     guard let item = ItemRepository.item(id: itemID) else { return }
 
     // Resolved before clearContents(): a missing image file would otherwise leave
