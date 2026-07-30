@@ -48,10 +48,53 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
 
 extension Item {
   /// Newest first. `id DESC` breaks ties so the order is total, not arbitrary.
+  ///
+  /// Selects `content`, so this is for the dedupe check and for resolving a
+  /// single item on paste — never for populating the list. See `ItemSummary`.
   static func recent(limit: Int = 500) -> SQLRequest<Item> {
     """
     SELECT * FROM items
-    ORDER BY MAX(copied_at, COALESCE(last_used_at, copied_at)) DESC, id DESC
+    ORDER BY \(sql: orderBy)
+    LIMIT \(limit)
+    """
+  }
+
+  static func withID(_ id: Int64) -> SQLRequest<Item> {
+    "SELECT * FROM items WHERE id = \(id)"
+  }
+
+  static let orderBy = "MAX(copied_at, COALESCE(last_used_at, copied_at)) DESC, id DESC"
+}
+
+/// What the list renders — everything except `content`.
+///
+/// `content` is capped at 1 MB per item, so observing 500 full rows could hold
+/// half a gigabyte resident to draw a list that only ever displays `preview`.
+/// The full payload is fetched by id at the moment it's actually needed.
+struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
+  var id: Int64
+  var preview: String
+  var sourceBundleID: String?
+  var sourceAppName: String?
+  var copiedAt: Int64
+  var lastUsedAt: Int64?
+
+  enum CodingKeys: String, CodingKey {
+    case id
+    case preview
+    case sourceBundleID = "source_bundle_id"
+    case sourceAppName = "source_app_name"
+    case copiedAt = "copied_at"
+    case lastUsedAt = "last_used_at"
+  }
+
+  var copiedAtDate: Date { Date(timeIntervalSince1970: Double(copiedAt) / 1000) }
+
+  static func recent(limit: Int = 500) -> SQLRequest<ItemSummary> {
+    """
+    SELECT id, preview, source_bundle_id, source_app_name, copied_at, last_used_at
+    FROM items
+    ORDER BY \(sql: Item.orderBy)
     LIMIT \(limit)
     """
   }

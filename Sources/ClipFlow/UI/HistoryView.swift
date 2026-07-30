@@ -9,12 +9,12 @@ import SwiftUI
 final class History {
   static let shared = History()
 
-  var items: [Item] = []
+  var items: [ItemSummary] = []
   private var task: Task<Void, Never>?
 
   private init() {
     let observation = ValueObservation.tracking { db in
-      try Item.recent().fetchAll(db)
+      try ItemSummary.recent().fetchAll(db)
     }
     task = Task { @MainActor [weak self] in
       do {
@@ -55,7 +55,7 @@ struct HistoryView: View {
     // is no manual key handling here.
     List(history.items, selection: $selection) { item in
       ItemRow(item: item)
-        .tag(item.id ?? 0)
+        .tag(item.id)
     }
     .listStyle(.sidebar)
     // onAppear alone isn't enough: the observation often delivers rows after the
@@ -82,7 +82,7 @@ struct HistoryView: View {
 }
 
 struct ItemRow: View {
-  let item: Item
+  let item: ItemSummary
 
   var body: some View {
     HStack(spacing: 8) {

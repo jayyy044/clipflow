@@ -1,5 +1,6 @@
 import AppKit
 import KeyboardShortcuts
+import ServiceManagement
 import SwiftUI
 
 extension KeyboardShortcuts.Name {
@@ -47,6 +48,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     _ = Database.shared
     _ = History.shared
     PasteboardMonitor.shared.start()
+    enableLaunchAtLogin()
+  }
+
+  /// A clipboard manager that isn't running has lost history you can never get
+  /// back, so this is on by default rather than opt-in. Phase 9's Settings pane
+  /// gets a toggle; until then, turn it off in System Settings > General >
+  /// Login Items.
+  private func enableLaunchAtLogin() {
+    // The unbundled `make debug` binary has no bundle identity to register.
+    guard Bundle.main.bundleIdentifier != nil else { return }
+
+    let service = SMAppService.mainApp
+    guard service.status != .enabled else {
+      NSLog("ClipFlow: launch at login already enabled")
+      return
+    }
+    do {
+      try service.register()
+    } catch {
+      // Not fatal — the app still works, it just won't come back after a reboot.
+      NSLog("ClipFlow: could not enable launch at login: \(error.localizedDescription)")
+      return
+    }
+    // register() succeeding does not mean it's on: macOS commonly parks the
+    // request at .requiresApproval and waits for the user in System Settings.
+    // Saying so beats appearing to work and then not surviving a reboot.
+    switch service.status {
+    case .enabled:
+      NSLog("ClipFlow: launch at login enabled")
+    case .requiresApproval:
+      NSLog("ClipFlow: launch at login needs approval in System Settings > General > Login Items")
+    case .notFound:
+      NSLog("ClipFlow: launch at login unavailable — app not found (running unbundled?)")
+    default:
+      NSLog("ClipFlow: launch at login status \(service.status.rawValue)")
+    }
   }
 
   @objc private func toggle() {

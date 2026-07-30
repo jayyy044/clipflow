@@ -93,6 +93,56 @@ match renders twice.
 
 ---
 
+## D-6: The memory budget is `phys_footprint`, not RSS
+
+NFR "idle resident memory < 60 MB" is ambiguous, and the two readings disagree
+at Phase 2 with an empty database:
+
+```
+rss            = 63.6 MB    over budget
+phys_footprint = 20 MB      under budget
+```
+
+RSS counts every physical page mapped into the process, including AppKit,
+SwiftUI, and Foundation pages that come from the system dyld shared cache and
+exist whether ClipFlow runs or not. `phys_footprint` counts what is actually
+attributable to us and is what Activity Monitor's "Memory" column reports.
+
+Read literally as RSS, the budget rules out SwiftUI entirely — linking it at all
+maps tens of MB of shared framework pages. So the budget is `phys_footprint`,
+measured with `footprint -p $(pgrep -x ClipFlow)`.
+
+Provisional: recorded with reasoning rather than agreed. Revisit if the intent
+really was RSS, because that changes the UI framework choice, not the code.
+
+---
+
+## D-7: Footprint research — what was checked and rejected
+
+Investigated once so it isn't re-derived. Maccy was read as the reference
+implementation rather than trusting general advice.
+
+**Rejected, already correct or not worth it:**
+
+| Idea | Why not |
+| --- | --- |
+| `-Osize`, `-static-stdlib`, explicit dead-strip, LTO | SPM `-c release` already gives `-O` + wholemodule + dead-strip, which is exactly what Maccy ships (`project.pbxproj:1719-1720`). `-static-stdlib` would *raise* unique RSS by un-sharing the stdlib. |
+| Tear down the panel's `NSHostingView` on close | Maccy keeps its `contentView` resident permanently (`FloatingPanel.swift:56-66`, `close()` only hides). Low single-digit MB, not where the budget goes. |
+| `DispatchSourceTimer` / `NSBackgroundActivityScheduler` | No measurable win over a tolerance'd `Timer`. Maccy sets *no* tolerance at all (`Clipboard.swift:51-59`), so ours is already stricter. |
+| `cache_size` / `mmap_size` tuning | GRDB sets neither; SQLite defaults are fine at this scale. |
+| `DatabasePool` instead of `DatabaseQueue` | Single writer, single reader. Queue is correct and lighter. |
+| `Configuration.automaticMemoryManagement` | Defaults true but is `#if`-gated to iOS/tvOS/watchOS. No effect on macOS. |
+
+**Deferred:**
+
+- Move `Database.shared` and `History.shared` init off the synchronous launch
+  path so the status item appears before migrations run. Sub-millisecond today;
+  matters once the database grows or a migration lands.
+- `NSBackgroundActivityScheduler` A/B against `powermetrics`, if idle energy ever
+  becomes a real complaint.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a
@@ -184,7 +234,14 @@ nice-to-have.
 
 - **S-19. Suspend the poller on sleep and screen lock.** FR-7.6 only covers
   clearing. Waking twice a second with the lid closed is what shows up in
-  battery diagnostics.
+  battery diagnostics. Maccy does not do this either — grepped, zero hits — so
+  there is no reference implementation to copy. Exact hooks:
+  - Display sleep: `NSWorkspace.shared.notificationCenter`,
+    `screensDidSleepNotification` / `screensDidWakeNotification`
+  - System sleep: `NSWorkspace.willSleepNotification` / `didWakeNotification`
+  - Screen lock has no public notification. `DistributedNotificationCenter.default()`
+    with `"com.apple.screenIsLocked"` / `"com.apple.screenIsUnlocked"` —
+    undocumented but stable and what this class of app uses.
 
 ---
 

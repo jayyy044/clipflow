@@ -15,3 +15,6 @@ DerivedData/
 
 ## Reference clones (Maccy et al) — read-only, never vendored
 reference/
+
+## Build output
+dist/

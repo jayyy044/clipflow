@@ -7,7 +7,16 @@ enum Database {
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
     do {
-      let queue = try DatabaseQueue(path: dir.appending(path: "clipflow.sqlite").path)
+      // GRDB only enables WAL automatically for DatabasePool, not DatabaseQueue,
+      // so this has to be explicit. Fewer fsyncs per write and no rewrite-the-
+      // whole-journal stall, which matters because we write on every copy.
+      var config = Configuration()
+      config.journalMode = .wal
+
+      let queue = try DatabaseQueue(
+        path: dir.appending(path: "clipflow.sqlite").path,
+        configuration: config
+      )
       try migrator.migrate(queue)
       return queue
     } catch {
