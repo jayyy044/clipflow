@@ -1,14 +1,25 @@
+import AppKit
 import Foundation
 import GRDB
 
 /// One captured clipboard entry.
 ///
-/// Text-only for now. Image and file columns arrive with Phase 6 as a migration —
-/// GRDB's migrator makes adding them a non-event, so they aren't scaffolded here.
+/// `kind='file'` is still unresolved (DECISIONS, known conflicts), so the enum
+/// has two cases and the column has no CHECK constraint that a third would have
+/// to rebuild the table to widen.
+enum ItemKind: String, Codable {
+  case text
+  case image
+}
+
 struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistableRecord {
   var id: Int64?
-  var content: String
+  var kind: ItemKind = .text
+  /// Nil for image rows — their bytes are on disk, never in SQLite (FR-2.2).
+  var content: String?
   var preview: String
+  /// Relative to `Database.directory`. Nil for text rows.
+  var imagePath: String?
   var sourceBundleID: String?
   var sourceAppName: String?
   /// Unix epoch **milliseconds**. Seconds would make same-second ordering
@@ -26,8 +37,10 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
   // nil over a good row. Explicit keys can't drift.
   enum CodingKeys: String, CodingKey {
     case id
+    case kind
     case content
     case preview
+    case imagePath = "image_path"
     case sourceBundleID = "source_bundle_id"
     case sourceAppName = "source_app_name"
     case copiedAt = "copied_at"
@@ -73,7 +86,9 @@ extension Item {
 /// The full payload is fetched by id at the moment it's actually needed.
 struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
   var id: Int64
+  var kind: ItemKind
   var preview: String
+  var imagePath: String?
   var sourceBundleID: String?
   var sourceAppName: String?
   var copiedAt: Int64
@@ -81,11 +96,20 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
 
   enum CodingKeys: String, CodingKey {
     case id
+    case kind
     case preview
+    case imagePath = "image_path"
     case sourceBundleID = "source_bundle_id"
     case sourceAppName = "source_app_name"
     case copiedAt = "copied_at"
     case lastUsedAt = "last_used_at"
+  }
+
+  /// The thumbnail generated at insert time, not the original — FR-6.7 forbids
+  /// the list ever touching a full-resolution file.
+  var thumbnail: NSImage? {
+    guard kind == .image, let imagePath else { return nil }
+    return ImageStore.thumbnail(for: imagePath)
   }
 
   /// The timestamp the row is *sorted* by, and therefore the one it must
@@ -97,7 +121,7 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
 
   static func recent(limit: Int = 500) -> SQLRequest<ItemSummary> {
     """
-    SELECT id, preview, source_bundle_id, source_app_name, copied_at, last_used_at
+    SELECT id, kind, preview, image_path, source_bundle_id, source_app_name, copied_at, last_used_at
     FROM items
     ORDER BY \(sql: Item.orderBy)
     LIMIT \(limit)

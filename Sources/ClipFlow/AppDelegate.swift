@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // can arrive and try to insert into a table that doesn't exist yet.
     _ = Database.shared
     _ = History.shared
+    ImageStore.sweepOrphans(referencedBy: ItemRepository.imagePaths())
     PasteboardMonitor.shared.start()
     enableLaunchAtLogin()
   }

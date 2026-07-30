@@ -113,9 +113,20 @@ struct ItemRow: View {
         .resizable()
         .frame(width: 16, height: 16)
 
-      Text(item.preview)
-        .lineLimit(1)
-        .truncationMode(.tail)
+      // FR-6.4/FR-6.7: image rows show the thumbnail in place of preview text.
+      // The text is still the fallback, which is what a missing or unwritable
+      // thumbnail degrades to rather than an empty row.
+      if let thumbnail = item.thumbnail {
+        Image(nsImage: thumbnail)
+          .resizable()
+          .aspectRatio(contentMode: .fit)
+          .frame(maxWidth: 96, maxHeight: 24)
+          .clipShape(.rect(cornerRadius: 2))
+      } else {
+        Text(item.preview)
+          .lineLimit(1)
+          .truncationMode(.tail)
+      }
 
       Spacer(minLength: 8)
 

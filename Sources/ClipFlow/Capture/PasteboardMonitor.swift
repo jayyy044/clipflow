@@ -20,6 +20,13 @@ final class PasteboardMonitor {
   /// and the 60 MB memory budget (DECISIONS S-4).
   private static let maxContentBytes = 1_000_000
 
+  /// Images get their own, more generous cap: they go to disk rather than into
+  /// SQLite (FR-2.2), so the 1 MB text limit — which exists to protect the 5 MB
+  /// database budget — does not apply. A full-screen PNG on a 6K Retina display
+  /// runs 5–15 MB, so anything under that would reject ordinary screenshots.
+  /// 32 MB still bounds the transient decode against the memory budget.
+  private static let maxImageBytes = 32_000_000
+
   /// Password managers `declareTypes` and then `setData`. A poll landing between
   /// the two reads the string before `ConcealedType` is declared and stores the
   /// password silently. Waiting for the change count to hold still closes that
@@ -91,23 +98,79 @@ final class PasteboardMonitor {
     let types = Set(pasteboard.types ?? [])
     guard types.isDisjoint(with: Self.skipTypes) else { return }
 
+    let app = NSWorkspace.shared.frontmostApplication
+    let now = Int64(Date().timeIntervalSince1970 * 1000)
+
+    // FR-1.2's priority order, applied as a fixed sequence rather than by asking
+    // the pasteboard what it prefers. Copying from Word or a browser puts PNG,
+    // TIFF, RTF and plain text down at once, and the same copy has to classify
+    // identically on every run (PRD HP-3).
+    //
+    // An image present at all settles the kind; this is not a fallback chain.
+    // Written as one it inserted a stray text row every time a screenshot was
+    // re-copied, because the dedupe hit looked the same as "no image here".
+    if let png = pngFromPasteboard() {
+      guard let item = imageItem(png: png, app: app, at: now) else { return }
+      ItemRepository.save(item)
+      return
+    }
+
+    guard let item = textItem(app: app, at: now) else { return }
+    ItemRepository.save(item)
+  }
+
+  @MainActor
+  private func imageItem(png: Data, app: NSRunningApplication?, at now: Int64) -> Item? {
+    guard png.count <= Self.maxImageBytes else { return nil }
+
+    // Before writing anything: a re-copied screenshot is a dedupe hit
+    // (DECISIONS D-5b), and discovering that after writing several megabytes to
+    // disk would leave a file to sweep every time.
+    let hash = Self.hash(png)
+    if ItemRepository.bump(contentHash: hash, at: now) { return nil }
+
+    guard let stored = ImageStore.save(png: png) else { return nil }
+
+    return Item(
+      kind: .image,
+      content: nil,
+      // `preview` is NOT NULL and image rows have no text, so it carries the one
+      // thing that identifies the image without opening it.
+      preview: "Image \(stored.pixelWidth) × \(stored.pixelHeight)",
+      imagePath: stored.relativePath,
+      sourceBundleID: app?.bundleIdentifier,
+      sourceAppName: app?.localizedName,
+      copiedAt: now,
+      contentHash: hash
+    )
+  }
+
+  @MainActor
+  private func textItem(app: NSRunningApplication?, at now: Int64) -> Item? {
     guard let content = pasteboard.string(forType: .string),
           !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
           content.utf8.count <= Self.maxContentBytes
-    else { return }
+    else { return nil }
 
-    let app = NSWorkspace.shared.frontmostApplication
-
-    ItemRepository.save(
-      Item(
-        content: content,
-        preview: Self.preview(of: content),
-        sourceBundleID: app?.bundleIdentifier,
-        sourceAppName: app?.localizedName,
-        copiedAt: Int64(Date().timeIntervalSince1970 * 1000),
-        contentHash: Self.hash(content)
-      )
+    return Item(
+      kind: .text,
+      content: content,
+      preview: Self.preview(of: content),
+      sourceBundleID: app?.bundleIdentifier,
+      sourceAppName: app?.localizedName,
+      copiedAt: now,
+      contentHash: Self.hash(content)
     )
+  }
+
+  /// PNG is preferred and used as-is; TIFF is transcoded, because FR-2.2 names
+  /// PNG as the on-disk format and a TIFF screenshot is several times larger for
+  /// the same pixels.
+  @MainActor
+  private func pngFromPasteboard() -> Data? {
+    if let png = pasteboard.data(forType: .png) { return png }
+    guard let tiff = pasteboard.data(forType: .tiff) else { return nil }
+    return NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
   }
 
   /// Collapses whitespace so multi-line stack traces stay readable in one row.
@@ -120,7 +183,11 @@ final class PasteboardMonitor {
   }
 
   static func hash(_ content: String) -> String {
-    SHA256.hash(data: Data(content.utf8))
+    hash(Data(content.utf8))
+  }
+
+  static func hash(_ data: Data) -> String {
+    SHA256.hash(data: data)
       .compactMap { String(format: "%02x", $0) }
       .joined()
   }
