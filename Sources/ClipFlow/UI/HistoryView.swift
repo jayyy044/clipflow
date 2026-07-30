@@ -250,7 +250,26 @@ struct ItemRow: View {
           .truncationMode(.tail)
       }
 
+      // DECISIONS S-16: why this row matched. Four thumbnails of the same
+      // terminal are indistinguishable without it.
+      if let snippet = item.ocrSnippet, !snippet.isEmpty, item.kind == .image {
+        Text(snippet)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+          .truncationMode(.tail)
+      }
+
       Spacer(minLength: 8)
+
+      // FR-6.4: this screenshot's text is not in the index yet. Without the
+      // marker, searching for a word that is plainly visible in the thumbnail
+      // and getting nothing reads as the feature being broken.
+      if item.isOCRPending {
+        Image(systemName: "text.viewfinder")
+          .foregroundStyle(.tertiary)
+          .help("Reading text…")
+      }
 
       Text(Self.age(of: item.lastActivityDate, relativeTo: now))
         .font(.caption)

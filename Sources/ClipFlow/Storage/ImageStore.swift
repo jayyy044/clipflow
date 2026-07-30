@@ -47,9 +47,7 @@ enum ImageStore {
     guard (try? png.write(to: file)) != nil else { return nil }
 
     guard let source = CGImageSourceCreateWithURL(file as CFURL, nil),
-          let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-          let width = properties[kCGImagePropertyPixelWidth] as? Int,
-          let height = properties[kCGImagePropertyPixelHeight] as? Int
+          let size = pixelSize(of: source)
     else {
       try? FileManager.default.removeItem(at: file)
       return nil
@@ -57,7 +55,22 @@ enum ImageStore {
 
     writeThumbnail(from: source, to: thumbnailURL(for: relativePath))
 
-    return Stored(relativePath: relativePath, pixelWidth: width, pixelHeight: height)
+    return Stored(relativePath: relativePath, pixelWidth: size.width, pixelHeight: size.height)
+  }
+
+  /// Dimensions from the file header — no pixels decoded, which is the point:
+  /// FR-4.6 has to reject an oversized image *without* paying to open it.
+  static func pixelSize(for relativePath: String) -> (width: Int, height: Int)? {
+    guard let source = CGImageSourceCreateWithURL(url(for: relativePath) as CFURL, nil) else { return nil }
+    return pixelSize(of: source)
+  }
+
+  private static func pixelSize(of source: CGImageSource) -> (width: Int, height: Int)? {
+    guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          let width = properties[kCGImagePropertyPixelWidth] as? Int,
+          let height = properties[kCGImagePropertyPixelHeight] as? Int
+    else { return nil }
+    return (width, height)
   }
 
   static func data(for relativePath: String) -> Data? {

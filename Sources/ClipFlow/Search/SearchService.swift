@@ -29,6 +29,11 @@ enum SearchService {
 
   /// Matching rows, best match first.
   ///
+  /// `snippet` over column 1 (`ocr_text`) is what makes an image result
+  /// identifiable: four terminal screenshots matching "timeout" look identical
+  /// as thumbnails, and the matched line is the only thing distinguishing them
+  /// (DECISIONS S-16).
+  ///
   /// bm25 returns a *negative* score where more negative is more relevant, so
   /// plain ascending order puts the best match on top. The column weights favour
   /// `content` over `ocr_text`: a screenshot yields hundreds of OCR words and a
@@ -37,7 +42,8 @@ enum SearchService {
   static func matching(_ query: String, limit: Int = 500) -> SQLRequest<ItemSummary> {
     """
     SELECT i.id, i.kind, i.preview, i.image_path,
-           i.source_bundle_id, i.source_app_name, i.copied_at, i.last_used_at
+           i.source_bundle_id, i.source_app_name, i.copied_at, i.last_used_at, i.ocr_status,
+           snippet(items_fts, 1, '', '', '…', 12) AS ocr_snippet
     FROM items i
     JOIN items_fts ON items_fts.rowid = i.id
     WHERE items_fts MATCH \(query)

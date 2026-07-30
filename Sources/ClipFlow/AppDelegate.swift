@@ -49,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     _ = History.shared
     ImageStore.sweepOrphans(referencedBy: ItemRepository.imagePaths())
     PasteboardMonitor.shared.start()
+    // FR-4.5: a queue interrupted by quitting left rows at 'pending'.
+    OCRQueue.shared.wake()
     enableLaunchAtLogin()
   }
 

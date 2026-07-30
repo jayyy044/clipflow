@@ -12,6 +12,16 @@ enum ItemKind: String, Codable {
   case image
 }
 
+/// Where a row sits in the OCR pipeline (FR-4.1/FR-4.3). Text rows are `na` —
+/// there is nothing to read. `failed` is terminal: FR-4.3 forbids a retry, so a
+/// pathological or unreadable image costs one attempt, ever.
+enum OCRStatus: String, Codable {
+  case na
+  case pending
+  case done
+  case failed
+}
+
 struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistableRecord {
   var id: Int64?
   var kind: ItemKind = .text
@@ -27,6 +37,7 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
   var copiedAt: Int64
   var lastUsedAt: Int64?
   var contentHash: String
+  var ocrStatus: OCRStatus = .na
 
   static let databaseTableName = "items"
 
@@ -46,6 +57,7 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
     case copiedAt = "copied_at"
     case lastUsedAt = "last_used_at"
     case contentHash = "content_hash"
+    case ocrStatus = "ocr_status"
   }
 
   mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -93,6 +105,10 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
   var sourceAppName: String?
   var copiedAt: Int64
   var lastUsedAt: Int64?
+  var ocrStatus: OCRStatus
+  /// The matching OCR line, when this row came back from a search (DECISIONS
+  /// S-16). Nil for the unfiltered list, which has no query to snippet against.
+  var ocrSnippet: String?
 
   enum CodingKeys: String, CodingKey {
     case id
@@ -103,6 +119,8 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
     case sourceAppName = "source_app_name"
     case copiedAt = "copied_at"
     case lastUsedAt = "last_used_at"
+    case ocrStatus = "ocr_status"
+    case ocrSnippet = "ocr_snippet"
   }
 
   /// The thumbnail generated at insert time, not the original — FR-6.7 forbids
@@ -119,9 +137,15 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
     Date(timeIntervalSince1970: Double(max(copiedAt, lastUsedAt ?? copiedAt)) / 1000)
   }
 
+  /// A screenshot whose OCR has not run yet is not searchable yet, and a row
+  /// that silently isn't in the index reads as broken. FR-6.4's marker needs the
+  /// status, so the list carries it.
+  var isOCRPending: Bool { kind == .image && ocrStatus == .pending }
+
   static func recent(limit: Int = 500) -> SQLRequest<ItemSummary> {
     """
-    SELECT id, kind, preview, image_path, source_bundle_id, source_app_name, copied_at, last_used_at
+    SELECT id, kind, preview, image_path, source_bundle_id, source_app_name, copied_at, last_used_at,
+           ocr_status, NULL AS ocr_snippet
     FROM items
     ORDER BY \(sql: Item.orderBy)
     LIMIT \(limit)

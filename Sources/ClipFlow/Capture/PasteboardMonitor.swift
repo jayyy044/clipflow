@@ -112,6 +112,10 @@ final class PasteboardMonitor {
     if let png = pngFromPasteboard() {
       guard let item = imageItem(png: png, app: app, at: now) else { return }
       ItemRepository.save(item)
+      // FR-4.1: the row is enqueued by being inserted 'pending'; this only tells
+      // an idle worker there is something to do. It returns immediately —
+      // nothing about OCR runs on this thread (FR-4.4).
+      OCRQueue.shared.wake()
       return
     }
 
@@ -141,7 +145,8 @@ final class PasteboardMonitor {
       sourceBundleID: app?.bundleIdentifier,
       sourceAppName: app?.localizedName,
       copiedAt: now,
-      contentHash: hash
+      contentHash: hash,
+      ocrStatus: .pending
     )
   }
 

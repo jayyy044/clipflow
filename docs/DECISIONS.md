@@ -168,6 +168,157 @@ implementation rather than trusting general advice.
 
 ---
 
+## D-8: OCR configuration, settled by measurement
+
+FR-4.2 specifies `VNRecognizeTextRequest` with `usesLanguageCorrection = true`.
+Both halves are overridden. All three configurations were run over rendered
+images whose exact text was known, so output could be scored against ground
+truth rather than eyeballed.
+
+**`usesLanguageCorrection = false`.** A judgment call on split evidence, not the
+clear win an earlier round of testing suggested. Recorded honestly because the
+first conclusion here was overconfident.
+
+Round one, three synthetic images of clean rendered code, scored against known
+ground truth: OFF won 2, tied 1, never worse.
+
+```
+             ON                          OFF
+config       jsonpath={•data}            jsonpath={.data}
+             RecognizeTextRequest ()     RecognizeTextRequest()
+stacktrace   NSURLSession. dataTask(     NSURLSession.dataTask(
+```
+
+Round two, 13 real web pages spanning tables, prose, code, charts and dense
+documentation: **ON won 8, OFF won 4, 1 tie**, and the split is by content type,
+not noise.
+
+```
+python docs   ON: "{m," "n}" "af3," "5}"        OFF: "{m,n}" "{m,n}+" "af3,5}"
+sqlite docs   ON: "ext/fts"  (drops the 5)      OFF: "ext/fts5"
+filesystems   ON: HPF S, VxF$, MES, Kiafs       OFF: HPFS, VxFS, MFS, Xiafs
+news article  ON: Wednesday George Figures      OFF: Wodnesday Gearge Fiaures
+RFC 9110      ON: readable                      OFF: "2RAnTeCANtaTOE" garbage
+```
+
+OFF is kept anyway, for two reasons that outweigh the win count:
+
+**Redundancy asymmetry.** A prose screenshot holds hundreds of words; mangling
+10% of them still leaves plenty of correct terms to find it by. A code screenshot
+is often worth finding by exactly one token — a version, a hash, `ext/fts5`,
+`{m,n}`. Corrupt that token and the screenshot becomes unfindable by the only
+thing that identifies it. Failures are equally frequent but not equally costly,
+and §4's target user is a developer copying error messages, stack traces and
+commit hashes.
+
+**The corpus was degraded in a way real captures are not.** The Chrome extension
+emits JPEG only, so every test image carried compression artifacts on small
+glyphs. Language correction earns its keep precisely on degraded input — it has
+more to repair. ClipFlow captures lossless PNG off the pasteboard, so round two
+overstates ON's advantage relative to the real pipeline.
+
+Revisit if the history fills with prose screenshots rather than code. OFF is also
+consistently faster: median 0.30s vs 0.48s across the 13.
+
+**`RecognizeTextRequest`, not `VNRecognizeTextRequest`.** macOS 15+, so it costs
+no version floor. Same engine, but async/await and Sendable rather than the
+Objective-C era callback API that is the reason for S-18.
+
+**`.accurate`, English pinned, `automaticallyDetectsLanguage = false`.** Measured
+0.22–0.40s per image against FR-4.6's 1.5s budget, so `.fast` buys latency nobody
+perceives at a cost in accuracy that was measured. Language auto-detection on a
+terminal screenshot is a coin flip that can select the wrong model.
+
+**`RecognizeDocumentsRequest` rejected — tested on its home turf and it lost.**
+
+macOS 26 only, so it would cost every Sequoia user and add a second code path
+behind `if #available`. It was tested specifically on tables, the one category it
+exists for, via both the flattened transcript and the structural `document.tables`
+API:
+
+| Image | Tables detected | Result |
+| --- | --- | --- |
+| pricing table | 1 | caught a 1-row table, missed the 7-row main one |
+| GDP by country | 1 | 38 rows × 5 cols, but 4 of 5 columns empty — every number gone |
+| filesystem comparison | 0 | not detected |
+| editor comparison | 0 | not detected |
+
+Flattened, it destroys row association exactly like the others: the pricing table
+came back as every Memory/vCPU value, then separately every $/hr value, then
+every $/mo — `$0.00595` landing ~40 tokens from `512 MiB`. It is also the slowest
+of the three (median 0.55s vs 0.30s).
+
+It fails at the only thing that would justify it. Not deferred — rejected.
+
+---
+
+## D-10: OCR recall collapses on dense tables, in every configuration
+
+Not a configuration problem and not fixable by settings. On dense tabular
+screenshots, all three configurations return a small fraction of the visible
+text:
+
+```
+filesystem comparison table   ~500 words visible   36 / 41 / 38 returned (A/B/C)
+GDP table                     dense numeric        67 / 61 / 57 returned
+```
+
+Only first-column link text and sidebar chrome survived; Creator, Year and OS
+columns were dropped wholesale.
+
+Two hypotheses tested:
+
+- **`minimumTextHeightFraction` is not the cause.** Lowering it to 0.004 produced
+  byte-identical output at native size, and actively hurt on upscaled images
+  (121 words → 34).
+- **Resolution is a partial cause.** Upscaling 2× lifted recall from 41 to 121
+  words, 3× to 125 — a 3× improvement that still leaves ~75% of the text unread.
+
+Chart axis labels are worse than useless: every configuration returned noise
+(`5848888885`, `1:alj0o0b80`). Charts are not usefully findable by their axis
+text.
+
+Consequence for G3: a screenshot of a dense table or a chart may not be findable
+by its contents. Screenshots of terminals, code, prose and documentation — the
+overwhelming majority of what this app is for — are. Worth stating plainly rather
+than discovering later.
+
+Upscaling before recognition is the available lever, and it is not free: memory
+is already the tightest budget (D-9) and 2× decode makes it worse. Revisit only
+if table screenshots turn out to matter in daily use.
+
+---
+
+## D-9: OCR costs memory that does not fully come back
+
+Recognising a single image, measured on the running app:
+
+```
+fresh launch, before any OCR     24 MB
+peak during recognition         113 MB   (neural engine 67 MB)
+immediately after                54 MB
+after 90s idle                   46 MB
+```
+
+Against NFR's 60 MB. Two things are true: the **idle** budget — which is what the
+NFR actually specifies, and D-6 settled is measured as `phys_footprint` — still
+passes at 46–54 MB. And the headroom is now thin, where it used to be a third of
+budget.
+
+This is Vision's model, not our queue. A single image costs the same as a
+21-image burst, so nothing is accumulating. Isolated measurement put `.accurate`
+at 57.8 MB max RSS against `.fast` at 30.8 MB.
+
+Accepted rather than fixed. The two levers both cost more than the problem:
+`.fast` trades away accuracy that D-8 measured, and moving Vision into a
+short-lived helper process — where the memory is reclaimed when it exits — is a
+second executable and IPC plumbing for a budget currently being met.
+
+Revisit if idle after OCR crosses 60 MB, which is the number to watch as
+thumbnails and history grow. The helper process is the upgrade path.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a

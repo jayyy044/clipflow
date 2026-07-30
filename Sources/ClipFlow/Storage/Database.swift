@@ -153,6 +153,19 @@ enum Database {
       try db.execute(sql: "INSERT INTO items_fts(items_fts) VALUES('rebuild')")
     }
 
+    // FR-2.3's OCR state column. A plain ADD COLUMN, not a table rebuild: the
+    // rebuild in v3 had to happen because nullability was changing, and doing one
+    // here would drop and recreate the FTS triggers for nothing.
+    migrator.registerMigration("v5_ocr_status") { db in
+      try db.execute(sql: "ALTER TABLE items ADD COLUMN ocr_status TEXT NOT NULL DEFAULT 'na'")
+      // Partial index: the queue only ever asks for pending rows, and 'na' is
+      // almost every row, so indexing the other three states would be dead weight.
+      try db.execute(sql: "CREATE INDEX idx_items_ocr ON items(ocr_status) WHERE ocr_status = 'pending'")
+      // Screenshots stored before Phase 7 existed are still worth reading
+      // (FR-4.5 picks them up on the next launch).
+      try db.execute(sql: "UPDATE items SET ocr_status = 'pending' WHERE kind = 'image'")
+    }
+
     return migrator
   }
 }
@@ -206,6 +219,32 @@ enum ItemRepository {
       try String.fetchAll(db, sql: "SELECT image_path FROM items WHERE image_path IS NOT NULL")
     }
     return Set(paths ?? [])
+  }
+
+  /// The next image waiting for OCR, newest first — a fresh screenshot becomes
+  /// searchable while a backlog is still draining, rather than after it.
+  static func nextPendingOCR() -> (id: Int64, imagePath: String)? {
+    let row = try? Database.shared.read { db in
+      try Row.fetchOne(db, sql: """
+        SELECT id, image_path FROM items
+        WHERE ocr_status = 'pending' AND image_path IS NOT NULL
+        ORDER BY id DESC LIMIT 1
+        """)
+    }
+    guard let row = row ?? nil else { return nil }
+    return (row["id"], row["image_path"])
+  }
+
+  /// Terminal state for one OCR attempt. The AFTER UPDATE trigger from v4 turns
+  /// the written `ocr_text` into FTS postings, which is the whole feature — no
+  /// index maintenance belongs here.
+  static func finishOCR(id: Int64, text: String?, status: OCRStatus) {
+    try? Database.shared.write { db in
+      try db.execute(
+        sql: "UPDATE items SET ocr_text = ?, ocr_status = ? WHERE id = ?",
+        arguments: [text, status.rawValue, id]
+      )
+    }
   }
 
   static func markUsed(id: Int64) {
