@@ -109,6 +109,10 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
   /// The matching OCR line, when this row came back from a search (DECISIONS
   /// S-16). Nil for the unfiltered list, which has no query to snippet against.
   var ocrSnippet: String?
+  /// `LENGTH(content)`, computed by SQLite — never the content itself, which is
+  /// exactly what this type exists to keep out of the list. Nil on image rows,
+  /// whose `content` is NULL (FR-2.2).
+  var contentLength: Int?
 
   enum CodingKeys: String, CodingKey {
     case id
@@ -121,6 +125,7 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
     case lastUsedAt = "last_used_at"
     case ocrStatus = "ocr_status"
     case ocrSnippet = "ocr_snippet"
+    case contentLength = "content_length"
   }
 
   /// The thumbnail generated at insert time, not the original — FR-6.7 forbids
@@ -142,10 +147,24 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
   /// status, so the list carries it.
   var isOCRPending: Bool { kind == .image && ocrStatus == .pending }
 
+  /// Shown only past the preview cut-off, because that is where two different
+  /// items start rendering as the same row: dedupe is on `content_hash`, so
+  /// overlapping-but-different selections are separate rows by design (DECISIONS
+  /// D-5b) and nothing else on the row tells them apart. Below the cut-off the
+  /// preview is the whole item and the number would be noise.
+  /// Labelled, because a bare "453" beside "2h ago" could be characters, bytes
+  /// or lines. `LENGTH()` counts characters, so that is what it says — the
+  /// compact form alone would read as kilobytes and be wrong for anything
+  /// multibyte.
+  var sizeHint: String? {
+    guard let contentLength, contentLength > PasteboardMonitor.previewLimit else { return nil }
+    return "\(contentLength.formatted(.number.notation(.compactName))) chars"
+  }
+
   static func recent(limit: Int = 500) -> SQLRequest<ItemSummary> {
     """
     SELECT id, kind, preview, image_path, source_bundle_id, source_app_name, copied_at, last_used_at,
-           ocr_status, NULL AS ocr_snippet
+           ocr_status, NULL AS ocr_snippet, LENGTH(content) AS content_length
     FROM items
     ORDER BY \(sql: Item.orderBy)
     LIMIT \(limit)

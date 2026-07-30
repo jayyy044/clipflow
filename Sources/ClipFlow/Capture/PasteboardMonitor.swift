@@ -178,13 +178,18 @@ final class PasteboardMonitor {
     return NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
   }
 
+  /// Beyond this a preview is only the opening of the item, so two different
+  /// items can render as the same row — which is what `ItemSummary.sizeHint`
+  /// exists to disambiguate.
+  static let previewLimit = 200
+
   /// Collapses whitespace so multi-line stack traces stay readable in one row.
   static func preview(of content: String) -> String {
     let collapsed = content
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .split(whereSeparator: \.isWhitespace)
       .joined(separator: " ")
-    return String(collapsed.prefix(200))
+    return String(collapsed.prefix(previewLimit))
   }
 
   static func hash(_ content: String) -> String {

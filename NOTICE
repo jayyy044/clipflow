@@ -1,6 +1,18 @@
+Portions of this software are adapted from Maccy (https://github.com/p0deje/Maccy).
+
+The affected files are:
+- Sources/ClipFlow/UI/Panel.swift
+- Sources/ClipFlow/Actions/Paster.swift
+
+Each file carries an in-source attribution comment. Maccy's copyright notice and
+permission text below must be retained in copies and substantial portions of this
+software.
+
+---
+
 The MIT License (MIT)
 
-Copyright (c) 2026 Maanas Saxena
+Copyright (c) 2025 Alex Rodionov
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

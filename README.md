@@ -143,5 +143,4 @@ something that looks wrong, check there first; it is probably wrong on purpose.
 
 MIT. See [LICENSE](LICENSE).
 
-Portions adapted from [Maccy](https://github.com/p0deje/Maccy) (MIT, Copyright
-(c) 2025 Alex Rodionov) — its notice is included in LICENSE.
+Portions adapted from [Maccy](https://github.com/p0deje/Maccy) — see [NOTICE](NOTICE) for third-party attribution.

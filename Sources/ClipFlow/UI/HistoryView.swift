@@ -335,6 +335,15 @@ struct ItemRow: View {
           .help("Reading text…")
       }
 
+      // Two long items sharing an opening paragraph render as the same preview,
+      // and the size is the only thing on the row that separates them.
+      if let sizeHint = item.sizeHint {
+        Text(sizeHint)
+          .font(.caption)
+          .foregroundStyle(.tertiary)
+          .fixedSize()
+      }
+
       Text(Self.age(of: item.lastActivityDate, relativeTo: now))
         .font(.caption)
         .foregroundStyle(.secondary)
