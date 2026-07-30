@@ -66,6 +66,11 @@ struct HistoryView: View {
   /// silently does nothing is indistinguishable from a broken shortcut
   /// (DECISIONS D-14).
   @State private var pinNotice: String?
+  /// Bumped every time a notice is raised, and used as the dismissal task's id.
+  /// Keying that task off the message text instead would not restart it on a
+  /// second refusal — the string is identical, so SwiftUI sees no change and the
+  /// notice expires ten seconds after the *first* one rather than the latest.
+  @State private var pinNoticeToken = 0
 
   var body: some View {
     VStack(spacing: 0) {
@@ -99,7 +104,7 @@ struct HistoryView: View {
     // just pressed and starts reading as a stuck error about the app. Same shape
     // as the debounce above: a replacement notice cancels this sleep and starts a
     // fresh ten seconds rather than stacking timers, and it dies with the view.
-    .task(id: pinNotice) {
+    .task(id: pinNoticeToken) {
       guard pinNotice != nil else { return }
       try? await Task.sleep(for: .seconds(10))
       guard !Task.isCancelled else { return }
@@ -256,6 +261,7 @@ struct HistoryView: View {
       return
     }
     pinNotice = "All \(ItemRepository.pinSlots.count) pin slots are in use — unpin one first."
+    pinNoticeToken += 1
   }
 
   private func copy(_ itemID: Int64) {
