@@ -164,7 +164,13 @@ final class PasteboardMonitor {
       sourceBundleID: app?.bundleIdentifier,
       sourceAppName: app?.localizedName,
       copiedAt: now,
-      contentHash: Self.hash(content)
+      contentHash: Self.hash(content),
+      // FR-5.1. Detected here rather than lazily on selection so the list can
+      // draw FR-6.4's glyph without touching `content` at all — and so a row is
+      // never briefly wrong about whether it has a link. Bounded by
+      // `URLDetector.scanLimit`, which is what keeps this off the copy path's
+      // critical timing.
+      detectedURLs: URLDetector.json(for: content)
     )
   }
 

@@ -3,6 +3,7 @@ import SwiftUI
 
 extension Notification.Name {
   static let clipFlowPanelDidOpen = Self("clipFlowPanelDidOpen")
+  static let clipFlowOpenURL = Self("clipFlowOpenURL")
 }
 
 /// Spotlight-style floating panel that shows without stealing focus from the app
@@ -81,6 +82,25 @@ final class Panel<Content: View>: NSPanel {
       x: visible.midX - frame.width / 2,
       y: visible.midY - frame.height / 2
     )
+  }
+
+  /// FR-5.2's Cmd+O, handled here rather than in SwiftUI.
+  ///
+  /// A Command chord is a *key equivalent*: AppKit offers it to the responder
+  /// chain and the menu system, and it never reaches SwiftUI's `onKeyPress`.
+  /// Three separate SwiftUI bindings for it were written and none of them ever
+  /// fired — only the context menu's button worked, and only while that menu was
+  /// open. This is where the event actually arrives.
+  ///
+  /// Only Cmd+O is claimed; everything else falls through to `super` so the
+  /// search field keeps Cmd+A, Cmd+C and Cmd+V.
+  override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    guard modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "o" else {
+      return super.performKeyEquivalent(with: event)
+    }
+    NotificationCenter.default.post(name: .clipFlowOpenURL, object: nil)
+    return true
   }
 
   // Without this the search field can never take keyboard focus.

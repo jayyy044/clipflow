@@ -91,12 +91,18 @@ struct HistoryView: View {
     // subsequent presses itself, hence .ignored.
     .onKeyPress(.downArrow) { move(1) }
     .onKeyPress(.upArrow) { move(-1) }
+    // FR-5.2's Cmd+O. Also bound on the search field below, for the same reason
+    // Return is: the field owns focus and may consume the event before the panel
+    // ever sees it.
     // Option is required: focus lives in the search field, so plain Delete has to
     // keep editing the query (FR-5.2).
     .onKeyPress(keys: [.delete, .deleteForward]) { press in
       guard press.modifiers.contains(.option), let selection else { return .ignored }
       delete(selection)
       return .handled
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .clipFlowOpenURL)) { _ in
+      openSelectedURL()
     }
     .onReceive(NotificationCenter.default.publisher(for: .clipFlowPanelDidOpen)) { _ in
       now = .now
@@ -223,6 +229,30 @@ struct HistoryView: View {
     Paster.paste()
   }
 
+  /// Driven by the panel's `performKeyEquivalent`, since a Command chord never
+  /// reaches SwiftUI's key handling. Falls back to the top row for the same
+  /// reason Return does: with nothing selected, the first result is what the user
+  /// means.
+  private func openSelectedURL() {
+    guard let target = selection ?? history.items.first?.id else { return }
+    openURL(target)
+  }
+
+  /// FR-5.3: first URL, system default browser. The browser picker was cut
+  /// (DECISIONS D-5.5), so there is nothing to configure and nothing to resolve —
+  /// `open(_:)` is the whole action. Reports whether there was a link, so the key
+  /// press can fall through on rows that have none.
+  @discardableResult
+  private func openURL(_ itemID: Int64) -> Bool {
+    guard let url = history.items.first(where: { $0.id == itemID })?.firstURL else { return false }
+    selection = itemID
+    NSWorkspace.shared.open(url)
+    // Closed like paste rather than like copy: the browser coming forward is the
+    // confirmation, and there is no highlight worth holding the panel open for.
+    onClose()
+    return true
+  }
+
   private static func modifiers(from flags: NSEvent.ModifierFlags) -> EventModifiers {
     var modifiers = EventModifiers()
     if flags.contains(.option) { modifiers.insert(.option) }
@@ -247,6 +277,12 @@ struct HistoryView: View {
           Button("Copy") { copy(item.id) }
           Button("Paste") { paste(item.id, plainText: false) }
           Button("Paste as Plain Text") { paste(item.id, plainText: true) }
+          // Absent, not disabled, on rows without a link: the glyph already says
+          // which rows have one, and a permanently greyed entry on most rows is
+          // noise. Same reasoning as the status menu's "Enable Pasting…".
+          if item.hasURL {
+            Button("Open URL") { openURL(item.id) }
+          }
           Divider()
           Button("Delete", role: .destructive) { delete(item.id) }
         }
@@ -325,6 +361,15 @@ struct ItemRow: View {
       }
 
       Spacer(minLength: 8)
+
+      // FR-6.4: the row holds a link, so Cmd+O does something here and nowhere
+      // else. Needed on the row because the URL is often past the preview
+      // cut-off, or on a later line the preview never shows.
+      if item.hasURL {
+        Image(systemName: "link")
+          .foregroundStyle(.tertiary)
+          .help("⌘O opens this link")
+      }
 
       // FR-6.4: this screenshot's text is not in the index yet. Without the
       // marker, searching for a word that is plainly visible in the thumbnail

@@ -54,6 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     PasteboardMonitor.shared.start()
     // FR-4.5: a queue interrupted by quitting left rows at 'pending'.
     OCRQueue.shared.wake()
+    // FR-5.1: rows copied before link detection existed have never been scanned,
+    // and a history with no link glyphs anywhere looks like the feature is off.
+    URLDetector.backfill()
     enableLaunchAtLogin()
     // FR-5.4: paste degrading to copy is a silent difference, and the grant can
     // vanish on its own (a rebuild with a different signature, a macOS update).

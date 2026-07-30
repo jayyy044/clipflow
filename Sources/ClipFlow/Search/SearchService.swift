@@ -44,6 +44,7 @@ enum SearchService {
     SELECT i.id, i.kind, i.preview, i.image_path,
            i.source_bundle_id, i.source_app_name, i.copied_at, i.last_used_at, i.ocr_status,
            snippet(items_fts, 1, '', '', '…', 12) AS ocr_snippet,
+           i.detected_urls,
            LENGTH(i.content) AS content_length
     FROM items i
     JOIN items_fts ON items_fts.rowid = i.id

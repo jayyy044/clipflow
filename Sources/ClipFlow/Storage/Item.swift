@@ -38,6 +38,9 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
   var lastUsedAt: Int64?
   var contentHash: String
   var ocrStatus: OCRStatus = .na
+  /// FR-5.1's JSON array of links. Nil only on image rows and on text rows that
+  /// predate the column — `URLDetector.backfill()` clears the latter at launch.
+  var detectedURLs: String?
 
   static let databaseTableName = "items"
 
@@ -58,6 +61,7 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
     case lastUsedAt = "last_used_at"
     case contentHash = "content_hash"
     case ocrStatus = "ocr_status"
+    case detectedURLs = "detected_urls"
   }
 
   mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -109,6 +113,11 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
   /// The matching OCR line, when this row came back from a search (DECISIONS
   /// S-16). Nil for the unfiltered list, which has no query to snippet against.
   var ocrSnippet: String?
+  /// FR-5.1's JSON array. Carried on the summary rather than fetched when Cmd+O
+  /// is pressed, because FR-6.4's glyph needs it on every visible row anyway —
+  /// and it is a few dozen bytes, unlike `content`, which is what this type
+  /// exists to keep out of the list.
+  var detectedURLs: String?
   /// `LENGTH(content)`, computed by SQLite — never the content itself, which is
   /// exactly what this type exists to keep out of the list. Nil on image rows,
   /// whose `content` is NULL (FR-2.2).
@@ -125,8 +134,18 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
     case lastUsedAt = "last_used_at"
     case ocrStatus = "ocr_status"
     case ocrSnippet = "ocr_snippet"
+    case detectedURLs = "detected_urls"
     case contentLength = "content_length"
   }
+
+  /// FR-5.3 opens the first detected link, and FR-6.4's glyph means "there is one
+  /// to open" — so both read the same parse. A stored string that no longer
+  /// parses as a `URL` must not advertise a link that Cmd+O then can't open.
+  var firstURL: URL? {
+    URLDetector.decode(detectedURLs).lazy.compactMap(URL.init(string:)).first
+  }
+
+  var hasURL: Bool { firstURL != nil }
 
   /// The thumbnail generated at insert time, not the original — FR-6.7 forbids
   /// the list ever touching a full-resolution file.
@@ -164,7 +183,7 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
   static func recent(limit: Int = 500) -> SQLRequest<ItemSummary> {
     """
     SELECT id, kind, preview, image_path, source_bundle_id, source_app_name, copied_at, last_used_at,
-           ocr_status, NULL AS ocr_snippet, LENGTH(content) AS content_length
+           ocr_status, NULL AS ocr_snippet, detected_urls, LENGTH(content) AS content_length
     FROM items
     ORDER BY \(sql: Item.orderBy)
     LIMIT \(limit)

@@ -419,6 +419,54 @@ ignored — PNG is written either way.
 
 ---
 
+## D-13: Link detection — links only, scanned to 64k, backfilled at launch
+
+Phase 8, FR-5.1. Three things settled here.
+
+**No phone numbers, confirming the v1 cut.** FR-5.1 asks for `.phoneNumber`
+alongside `.link`, but FR-5.2's action table defines no phone action, so the
+column would be written on every copy and read by nothing. A second detector pass
+per copy for a dead column. Reinstate it together with an action, not before.
+
+**The detector input is capped at 64k characters, and the cap is measured.**
+S-4 already caps stored content at 1 MB, which is still far too much to run a
+regex pass over on the capture path. On deliberately link-dense text — a URL
+every ~50 characters, the worst case there is:
+
+```
+1.9 M chars    1343 ms
+64k chars        21 ms
+```
+
+Ordinary text is much faster; 21 ms is the pathological ceiling, not the normal
+cost. 64k is also well past any text a link is meaningfully *in* — nobody opens
+the 900th URL of a pasted log. A match that runs into the cut-off is discarded,
+because half a URL opens the wrong page rather than no page.
+
+**Backfilled on launch, not in the migration.** Detection is `NSDataDetector`,
+so it cannot happen in SQL, and without a backfill every pre-existing row would
+show no link glyph and the feature would read as broken on the history the user
+already has. Same shape as the OCR queue's FR-4.5 resume pass: a detached
+`.utility` task at launch over `kind='text' AND detected_urls IS NULL`, ids first
+and content fetched one row at a time (rows are up to 1 MB each). `NULL` means
+"never scanned" and `[]` means "scanned, no links", which is what makes the pass
+converge and stay converged.
+
+**What `.link` actually matches, observed rather than assumed:**
+
+| Input | Detected |
+| --- | --- |
+| `github.com` in prose | `http://github.com` — bare domains do get a glyph |
+| `someone@example.com` | `mailto:someone@example.com` — Cmd+O opens the mail client |
+| `/Users/me/x.txt`, `localhost:3000`, `git@github.com:u/r.git` | nothing |
+| `[docs](https://example.com/a_b_(c))` | keeps the markdown's trailing `)` |
+
+The email and bare-domain cases are `NSDataDetector`'s own classification and are
+left alone: filtering `mailto:` would be deciding for the user that an address is
+not a link, and the glyph costs nothing when ignored.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a

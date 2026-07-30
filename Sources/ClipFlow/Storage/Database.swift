@@ -166,6 +166,17 @@ enum Database {
       try db.execute(sql: "UPDATE items SET ocr_status = 'pending' WHERE kind = 'image'")
     }
 
+    // FR-5.1's link column. A plain ADD COLUMN for the same reason v5 was one:
+    // nothing about an existing column changes, and a rebuild would drop and
+    // recreate the FTS triggers for nothing.
+    //
+    // Existing rows stay NULL. Detection is `NSDataDetector`, not SQL, so it
+    // cannot happen here — `URLDetector.backfill()` fills them on the next
+    // launch, and NULL is what it selects on.
+    migrator.registerMigration("v6_detected_urls") { db in
+      try db.execute(sql: "ALTER TABLE items ADD COLUMN detected_urls TEXT")
+    }
+
     return migrator
   }
 }
@@ -280,6 +291,23 @@ enum ItemRepository {
         sql: "UPDATE items SET ocr_text = ?, ocr_status = ? WHERE id = ?",
         arguments: [text, status.rawValue, id]
       )
+    }
+  }
+
+  /// Text rows that predate FR-5.1. NULL means "never scanned" — a scanned row
+  /// with no links holds `[]` — so this drains to empty and stays there.
+  /// Ids only: see `URLDetector.backfill()` for why the content isn't fetched
+  /// alongside.
+  static func idsMissingURLDetection() -> [Int64] {
+    let ids = try? Database.shared.read { db in
+      try Int64.fetchAll(db, sql: "SELECT id FROM items WHERE kind = 'text' AND detected_urls IS NULL")
+    }
+    return ids ?? []
+  }
+
+  static func setDetectedURLs(id: Int64, json: String) {
+    try? Database.shared.write { db in
+      try db.execute(sql: "UPDATE items SET detected_urls = ? WHERE id = ?", arguments: [json, id])
     }
   }
 
