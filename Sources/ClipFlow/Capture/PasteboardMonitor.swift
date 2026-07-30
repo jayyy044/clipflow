@@ -20,6 +20,15 @@ final class PasteboardMonitor {
   /// and the 60 MB memory budget (DECISIONS S-4).
   private static let maxContentBytes = 1_000_000
 
+  /// RTF gets the same 1 MB cap as the plain string, not a larger one. It goes
+  /// into the same SQLite row, so it spends the same 5 MB database budget
+  /// (FR-2.5), and rich text inflates unpredictably — styling, fonts and
+  /// hex-encoded embedded images can make an RTF many times the size of its
+  /// plain text. Over the cap the RTF is dropped and the plain string is still
+  /// stored: the item stays captured and searchable, and the only loss is
+  /// formatting on paste, which is exactly what the app did before FR-1.2.
+  private static let maxRTFBytes = 1_000_000
+
   /// Images get their own, more generous cap: they go to disk rather than into
   /// SQLite (FR-2.2), so the 1 MB text limit — which exists to protect the 5 MB
   /// database budget — does not apply. A full-screen PNG on a 6K Retina display
@@ -37,6 +46,17 @@ final class PasteboardMonitor {
   private var timer: Timer?
   private var lastChangeCount: Int
 
+  /// Why the timer is currently down, one entry per system reason
+  /// (DECISIONS S-19). A set rather than a bool because the reasons overlap and
+  /// do not nest: closing the lid posts display sleep *and* system sleep, and a
+  /// machine woken by the power button is awake while still locked — so the last
+  /// resume to arrive has to be the one that restarts polling, not the first.
+  ///
+  /// Deliberately separate from `isPaused`: a user who chose to pause and a
+  /// system that went to sleep are different states, and waking must not
+  /// silently un-pause the user.
+  private var suspendedBy: Set<String> = []
+
   /// Set by our own writes to the pasteboard. Without it, every paste bumps
   /// `changeCount`, gets re-captured, and reshuffles the history
   /// (DECISIONS S-1). Phase 4 will call `ignoreNextChange()` from the paster.
@@ -46,6 +66,66 @@ final class PasteboardMonitor {
 
   private init() {
     lastChangeCount = pasteboard.changeCount
+    observeSleepAndLock()
+  }
+
+  /// Nothing can reach the pasteboard while the display is off, the machine is
+  /// asleep, or the screen is locked, so 2 Hz of wakeups buys nothing and is
+  /// exactly what shows up in battery diagnostics with the lid shut
+  /// (DECISIONS S-19, FR-7.6's neighbourhood).
+  ///
+  /// Three separate sources because they are three separate events: the lid can
+  /// close without the machine sleeping, the machine can sleep without the
+  /// screen locking, and screen lock is the only one of the three with no public
+  /// notification — `com.apple.screenIsLocked` is undocumented but stable, and
+  /// is what this class of app uses.
+  private func observeSleepAndLock() {
+    let workspace = NSWorkspace.shared.notificationCenter
+    for (name, reason) in [
+      (NSWorkspace.screensDidSleepNotification, "display"),
+      (NSWorkspace.willSleepNotification, "system"),
+    ] {
+      workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        self?.suspend(reason)
+      }
+    }
+    for (name, reason) in [
+      (NSWorkspace.screensDidWakeNotification, "display"),
+      (NSWorkspace.didWakeNotification, "system"),
+    ] {
+      workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        self?.resume(reason)
+      }
+    }
+
+    let distributed = DistributedNotificationCenter.default()
+    distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) {
+      [weak self] _ in self?.suspend("lock")
+    }
+    distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) {
+      [weak self] _ in self?.resume("lock")
+    }
+  }
+
+  private func suspend(_ reason: String) {
+    suspendedBy.insert(reason)
+    guard timer != nil else { return }
+    NSLog("ClipFlow: capture suspended (\(reason))")
+    stop()
+  }
+
+  /// Restarts only once every reason has cleared. `isPaused` is untouched, so a
+  /// user pause survives a sleep/wake cycle.
+  ///
+  /// The first tick after resuming sees a `changeCount` that moved while we were
+  /// down and captures whatever is on the pasteboard now — the same thing that
+  /// happens after any other gap, and the alternative is silently losing a copy
+  /// made between an unlock and the next tick.
+  private func resume(_ reason: String) {
+    suspendedBy.remove(reason)
+    guard suspendedBy.isEmpty, timer == nil else { return }
+    NSLog("ClipFlow: capture resumed (\(reason))")
+    start()
   }
 
   func start() {
@@ -157,10 +237,19 @@ final class PasteboardMonitor {
           content.utf8.count <= Self.maxContentBytes
     else { return nil }
 
+    // FR-1.2 ranks `public.rtf` above plain text, but both are the same kind of
+    // item — so RTF is an extra representation on a text row, not a different
+    // classification. Read explicitly rather than asking the pasteboard which
+    // type it prefers, so a Word copy classifies identically on every run
+    // (PRD HP-3).
+    var rtf = pasteboard.data(forType: .rtf)
+    if let data = rtf, data.count > Self.maxRTFBytes { rtf = nil }
+
     return Item(
       kind: .text,
       content: content,
       preview: Self.preview(of: content),
+      rtfData: rtf,
       sourceBundleID: app?.bundleIdentifier,
       sourceAppName: app?.localizedName,
       copiedAt: now,

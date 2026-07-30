@@ -23,9 +23,17 @@ bundle:
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS
 	cp .build/release/ClipFlow $(APP)/Contents/MacOS/ClipFlow
+	# The OCR helper lives beside the main binary because that is how the app
+	# finds it — relative to its own executable, never by absolute path
+	# (DECISIONS D-9).
+	cp .build/release/ClipFlowOCR $(APP)/Contents/MacOS/ClipFlowOCR
 	cp Resources/Info.plist $(APP)/Contents/Info.plist
 	printf 'APPL????' > $(APP)/Contents/PkgInfo
 	@echo "signing as: $(SIGN_ID)"
+	# Nested code first: the bundle signature seals whatever is inside it, so
+	# signing the app before the helper invalidates the app's own signature the
+	# moment the helper is signed.
+	codesign --force --sign "$(SIGN_ID)" $(APP)/Contents/MacOS/ClipFlowOCR
 	codesign --force --sign "$(SIGN_ID)" --identifier $(BUNDLE_ID) $(APP)
 
 run: bundle

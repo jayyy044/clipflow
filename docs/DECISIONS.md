@@ -539,6 +539,129 @@ it was launched with.
 
 ---
 
+## D-16: Suspension is a set of reasons, not a flag — and it is not `isPaused`
+
+S-19 implemented. Three sources, six notifications, and the two things that were
+easy to get wrong:
+
+**Suspension does not touch `isPaused`.** A user who paused capture and a machine
+that went to sleep are different states that happen to have the same effect.
+Resuming from sleep starts the timer; `tick` still returns early while the user's
+pause stands, so waking never silently un-pauses anyone.
+
+**The reasons are a set, because they overlap and do not nest.** Closing the lid
+posts display sleep *and* system sleep; a machine woken by the power button is
+awake while still locked. With a single bool the first resume to arrive wins and
+the poller runs through the lock screen. Observed exactly that during
+verification, and it is what the set fixes:
+
+```
+16:15:46  capture suspended (display)     pmset displaysleepnow
+          (screenIsLocked arrives, timer already down — recorded, not logged)
+16:16:00  capture resumed (lock)          only after BOTH cleared
+```
+
+The first tick after resuming sees a `changeCount` that moved while we were down
+and captures whatever is on the pasteboard now. Deliberate: the alternative is
+losing a copy made between the unlock and the next tick.
+
+Verified by posting `com.apple.screenIsLocked` / `...Unlocked` on
+`DistributedNotificationCenter` — the same names and payload the system posts —
+and by `pmset displaysleepnow`. A copy made while suspended did not reach the
+database until the resume. System sleep (`willSleep` / `didWake`) was **not**
+exercised: it registers in the same loop as display sleep, but suspending the
+machine also suspends the shell doing the checking.
+
+---
+
+## D-17: An RTF item is one row, not two, and re-copying it does not restyle it
+
+FR-1.2's `rtf_data` landed, which is what makes FR-5.2's Option+Shift+Enter
+differ from Enter (D-12 recorded that it did not).
+
+**Dedupe still hashes the plain string only, so the same text with different
+formatting is one row.** Two rows whose `preview` is byte-identical cannot be
+told apart in the list — which is the exact failure D-5b rejected. Formatting is
+invisible until paste, so a second row would look like a duplicate bug and would
+be picked between at random.
+
+Corollary, chosen rather than fallen into: a dedupe hit bumps `last_used_at` and
+leaves `rtf_data` alone, so the formatting is the one it was **first** captured
+with. Rewriting it on every hit would make the same list row paste differently
+depending on where you last copied the text from, and nothing on screen would
+say so. Observed working: copying the styled string, then the identical plain
+string, kept one row with its RTF intact.
+
+**The RTF cap is the same 1 MB as the plain string (S-4), not a larger one.** It
+goes into the same row and spends the same 5 MB database budget, and rich text
+inflates unpredictably — hex-encoded embedded images most of all. Over the cap
+the RTF is dropped and the plain string is still stored, so the item stays
+captured and searchable and the only loss is formatting: the app's behaviour
+before this change.
+
+Richest representation is written to the pasteboard first, because a reader takes
+the first declared type it understands. RTF written after the string would never
+be chosen and the two paste actions would collapse back into one.
+
+Still true from the known-conflicts list: no `public.html` is retained. Also not
+retained: an RTF-only copy with no `public.utf8-plain-text` alongside is still
+dropped, as it was before. Both are rare and neither regressed.
+
+---
+
+## D-18: The OCR helper process, measured — D-9's upgrade path, taken
+
+D-9 left this deferred with "revisit if idle after OCR crosses 60 MB". Taken
+early because the fix turned out to be ~60 lines and no IPC framework: a second
+executable, one image path in as `argv[1]`, recognised text out on stdout,
+launched with `Process`. No XPC — XPC buys a service lifetime, which is the
+exact cost being avoided.
+
+Measured on the running app, same machine and method as D-9
+(`footprint -p $(pgrep -x ClipFlow)`):
+
+| | in-process (D-9) | helper process |
+| --- | --- | --- |
+| fresh launch, before any OCR | 24 MB | 26 MB |
+| peak during recognition | 113 MB | 30 MB |
+| immediately after | 54 MB | 30 MB |
+| after 90 s idle | 46 MB | 29 MB |
+
+The 60–64 MB Vision costs is still paid, but in a process that exits: the helper
+measured 64 MB max RSS and 0.49 s wall for a 900×260 PNG, and the app never sees
+it. Idle after OCR is back to roughly where it was before OCR existed.
+
+**Settings are D-8's, moved verbatim** — `RecognizeTextRequest`, `.accurate`,
+`usesLanguageCorrection = false`, English pinned, no auto-detection. The helper
+is a relocation, not a re-tune.
+
+**A missing helper leaves rows `pending`; everything else fails them.** FR-4.3
+forbids retries, so marking every queued screenshot `failed` because a build
+shipped without the binary would destroy work a corrected build could still do.
+The drain stands down instead and FR-4.5 picks the rows up next launch. A crash,
+a non-zero exit and the 30 s deadline are all terminal for the one row, which is
+what FR-4.3 asks for. All four paths were exercised:
+
+```
+helper deleted        item left pending, drain stood down, done on next launch
+helper exits 3        failed
+helper hangs          terminated at 30 s, failed (exit 15)
+helper works          done, text correct
+```
+
+The 30 s deadline is not FR-4.6's latency target — it is sized to never fire in
+normal use (D-8 measured 0.22–0.40 s) and only exists so a wedged helper cannot
+hang the queue forever.
+
+The app locates the helper beside its own executable
+(`Bundle.main.executableURL`), so the bundle at `Contents/MacOS/ClipFlowOCR` and
+`make debug`'s `.build/debug/ClipFlowOCR` both resolve with no build-time
+knowledge of either. The Makefile signs the nested binary **before** the bundle,
+with the same discovered identity — signing the app first and the helper second
+invalidates the app's own signature.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a

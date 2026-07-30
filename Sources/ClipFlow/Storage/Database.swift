@@ -193,6 +193,16 @@ enum Database {
         """)
     }
 
+    // FR-1.2's rich representation. Plain ADD COLUMN for the same reason v5, v6
+    // and v7 were: nothing about an existing column changes, and a rebuild would
+    // drop and recreate the FTS triggers for nothing.
+    //
+    // Not indexed and not in the FTS table: it is written on capture and read
+    // only by `Clipboard.copy`, and its text is already in `content`.
+    migrator.registerMigration("v8_rtf") { db in
+      try db.execute(sql: "ALTER TABLE items ADD COLUMN rtf_data BLOB")
+    }
+
     return migrator
   }
 }
