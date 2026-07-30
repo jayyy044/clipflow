@@ -467,6 +467,78 @@ not a link, and the glyph costs nothing when ignored.
 
 ---
 
+## D-14: `pin_slot` allocation — nine slots, lowest free wins, tenth pin refused
+
+The three questions the "known conflicts" section left open, settled together
+because they are the same question asked three ways: **is the slot number
+meaningful, or incidental?** It is meaningful — D-3 already decided the whole
+point of a slot is that it does not move — so every answer below is the one that
+keeps the number stable and visible.
+
+**Nine slots, and a tenth pin is refused.** `Option+1..9` is the entire reason
+`pin_slot` exists (FR-5.2), so there are exactly nine addressable pins. The
+alternative — pin without a slot — creates a second class of pin that survives
+eviction but no shortcut reaches, which is a pin that half works and cannot be
+told apart from one that fully works. Refusal says so out loud: the panel shows
+"All 9 pin slots are in use — unpin one first." Silently doing nothing is
+indistinguishable from a broken shortcut, and the pinned section is right there
+to unpin from.
+
+**Freed slots are reused, lowest-numbered first.** Holding a slot open for the
+row that vacated it means unpinning your slot-1 item leaves `Option+1` dead
+until you re-pin something you have no way to nominate. Lowest-first also keeps
+the used range dense, so the shortcuts in play are always `Option+1..n` rather
+than an arbitrary scatter.
+
+**The pinned section is ordered by slot, not by pin time.** The number on the
+row has to be the number you press. Ordering by recency would make position and
+shortcut disagree, which is exactly the failure D-3 rejected for the unpinned
+list.
+
+Uniqueness is enforced by `CREATE UNIQUE INDEX idx_items_pin_slot ON
+items(pin_slot) WHERE pin_slot IS NOT NULL`, not only by the allocator — two
+rows sharing a slot would make `Option+N` resolve to an arbitrary one of them.
+Allocation reads the used set and claims a slot inside a single write
+transaction, so two pins in the same millisecond cannot both see the same gap.
+
+### Retention, which is where this could have gone badly
+
+FR-2.5's "keep the newest N unpinned" is load-bearing on the word *unpinned*.
+`WHERE pinned = 0` sits inside the eviction subquery, so pinned rows are out of
+the `OFFSET` count as well as out of the `DELETE`. Filtering only the delete
+would leave nine pins consuming nine of the hundred slots and silently shorten
+the history — deleting unpinned rows early, which is the one outcome the user
+never asked for. Verified against 150 filler rows with nine pins deliberately
+older than all of them: 192 rows in, 109 out, all nine pins intact with slots
+1..9.
+
+---
+
+## D-15: A backup is the database **and** `images.noindex`, and `HOME` does not move it
+
+Images live on disk under `images.noindex`; the database stores only their paths
+(FR-2.2). Every "back up before destructive testing" instruction given so far
+said to run `sqlite3 ".backup"` on the database and warned that a plain `cp` is
+invalid under WAL. None of them mentioned the images directory.
+
+During pinning work a self-test assumed `URL.applicationSupportDirectory`
+follows the `HOME` environment variable. It does not — macOS resolves it
+independently of that override — so a test written for a scratch copy ran
+against the live database. It inserted 162 rows, which pushed the user's real
+rows past the retention limit, and eviction did exactly what it is supposed to:
+deleted the overflow and their image files with it. The database was restored
+from its backup and the 13 rows left orphaned were deleted by hand. The image
+files were unrecoverable, because a database backup does not contain them.
+
+Two rules follow. A backup of this app is `.backup` of the database *plus* a
+copy of `images.noindex`; either alone restores to a state that does not match
+itself. And `URL.applicationSupportDirectory` cannot be redirected with `HOME`,
+so anything writing to a "scratch" location has to assert the *resolved* path is
+under a scratch directory before it writes, rather than trusting the environment
+it was launched with.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a
@@ -601,6 +673,10 @@ nice-to-have.
   selected in Finder become one row or three? `Enter` must write
   `public.file-url`, not the path as text. What is the preview and the icon?
   Resolve before implementing `kind='file'`.
-- **`pin_slot` allocation rules are undefined.** What happens on the 10th pin —
-  refuse, or pin without a slot? On unpin, is the slot reused by the next pin or
-  held? Is the pinned section ordered by slot or by pin time?
+- **`Clear History…` clears pinned items too.** FR-7.5 wants "clear unpinned" and
+  "clear everything" as two separate destructive actions. There is one, and it
+  takes the pins with it. It confirms first and names the count, so it is not
+  silent — but a user who pinned nine things does not expect them in scope.
+  Belongs with the rest of Phase 9's settings work.
+
+Resolved since: `pin_slot` allocation rules, see D-14.

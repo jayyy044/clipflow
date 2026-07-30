@@ -15,6 +15,28 @@ extension KeyboardShortcuts.Name {
   /// appear to do nothing on a machine that has already run the app — clear it
   /// with `defaults delete ClipFlow KeyboardShortcuts_toggleHistory` first.
   static let toggleHistory = Self("toggleHistory", default: .init(.v, modifiers: [.control, .command]))
+
+  /// FR-5.2's `Option+1..9`, one registration per slot. Index 0 is slot 1.
+  ///
+  /// Global, not panel-local: the whole point is skipping the window (DECISIONS
+  /// D-3), so these have to fire while ClipFlow has no focus at all — which is
+  /// what KeyboardShortcuts' Carbon hot key does and `onKeyPress` cannot.
+  ///
+  /// Ctrl+Cmd, not FR-5.2's Option. Option+1..9 emits `¡™£¢∞§¶•ª` on a US
+  /// layout, and HP-4 warns that character-emitting chords get suppressed in
+  /// secure input contexts — the same reason Option+J was rejected for
+  /// `toggleHistory`. They are also tab-switchers in a lot of apps, and a global
+  /// Carbon hot key wins system-wide with no Settings UI to rebind it yet.
+  /// Ctrl+Cmd emits nothing and matches the toggle hotkey.
+  ///
+  /// Same first-launch gotcha as `toggleHistory`: the default is written to
+  /// UserDefaults once and the stored value then wins.
+  static let pasteSlots: [Self] = zip(
+    1...9,
+    [KeyboardShortcuts.Key.one, .two, .three, .four, .five, .six, .seven, .eight, .nine]
+  ).map { slot, key in
+    Self("pasteSlot\(slot)", default: .init(key, modifiers: [.control, .command]))
+  }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -41,6 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     KeyboardShortcuts.onKeyUp(for: .toggleHistory) { [weak self] in
       self?.toggle()
+    }
+
+    for (index, name) in KeyboardShortcuts.Name.pasteSlots.enumerated() {
+      KeyboardShortcuts.onKeyUp(for: name) { [weak self] in
+        self?.pasteSlot(index + 1)
+      }
     }
 
     // Touching .shared here is what runs the migrations, before the first copy
@@ -97,6 +125,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     default:
       NSLog("ClipFlow: launch at login status \(service.status.rawValue)")
     }
+  }
+
+  /// FR-5.2's `Option+N`: paste the item in that pin slot without the panel ever
+  /// appearing. Same `Clipboard.copy` + `Paster.paste` pair the panel's
+  /// Option+Enter uses — there is one paste path, and HP-2's timing and FR-5.4's
+  /// copy-only fallback both live in it.
+  ///
+  /// An empty slot does nothing. Pasting the wrong item into a document because
+  /// slot 4 happens to be free is worse than a shortcut that appears inert.
+  @MainActor private func pasteSlot(_ slot: Int) {
+    guard let itemID = ItemRepository.pinnedItemID(slot: slot) else { return }
+    // Nothing of ours is on screen in the normal case, so frontmost is already
+    // the app to paste into. Closing first covers the case where the panel is
+    // open — it holds key focus, and DECISIONS S-12's capture must not see it.
+    panel.close()
+    Paster.captureTargetApp()
+    Clipboard.copy(itemID: itemID)
+    Paster.paste()
   }
 
   @objc private func statusItemClicked() {

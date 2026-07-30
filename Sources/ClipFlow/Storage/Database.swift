@@ -177,6 +177,22 @@ enum Database {
       try db.execute(sql: "ALTER TABLE items ADD COLUMN detected_urls TEXT")
     }
 
+    // FR-2.3's pinning columns. Plain ADD COLUMNs for the same reason v5 and v6
+    // were: nothing about an existing column changes, and a rebuild would drop
+    // and recreate the FTS triggers for nothing.
+    //
+    // The partial UNIQUE index is what makes DECISIONS D-3 safe. Option+1..9
+    // resolves a slot to exactly one row, so two rows sharing a slot would make
+    // the shortcut's target arbitrary. Enforced in SQLite rather than only in
+    // `pin(id:)`, for the same reason D-5b's dedupe index is.
+    migrator.registerMigration("v7_pinning") { db in
+      try db.execute(sql: "ALTER TABLE items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+      try db.execute(sql: "ALTER TABLE items ADD COLUMN pin_slot INTEGER")
+      try db.execute(sql: """
+        CREATE UNIQUE INDEX idx_items_pin_slot ON items(pin_slot) WHERE pin_slot IS NOT NULL
+        """)
+    }
+
     return migrator
   }
 }
@@ -215,14 +231,17 @@ enum ItemRepository {
   /// subquery rather than fetching candidates keeps the history off the heap
   /// (DECISIONS D-9).
   ///
-  /// TODO(Phase 9): pinned rows are never evicted (FR-2.5). There is no `pinned`
-  /// column yet; when there is, exclude it from the subquery *and* from the
-  /// count, or a full set of pins would evict everything else.
+  /// FR-2.5: pinned rows are never evicted. `WHERE pinned = 0` sits *inside* the
+  /// subquery, which is what excludes them from the OFFSET count as well as from
+  /// the delete — retention is "keep the newest N unpinned", not "keep N rows of
+  /// which some happen to be pinned". Filtering only the DELETE would let nine
+  /// pins silently shorten the history by nine.
   static func evictBeyondRetentionLimit() {
     let evicted = try? Database.shared.write { db -> Int in
       try db.execute(sql: """
         DELETE FROM items WHERE id IN (
           SELECT id FROM items
+          WHERE pinned = 0
           ORDER BY \(Item.orderBy)
           LIMIT -1 OFFSET \(retentionLimit)
         )
@@ -309,6 +328,59 @@ enum ItemRepository {
     try? Database.shared.write { db in
       try db.execute(sql: "UPDATE items SET detected_urls = ? WHERE id = ?", arguments: [json, id])
     }
+  }
+
+  /// Slots are 1..9 because that is how many `Option+1..9` can address
+  /// (FR-5.2). A pinned row always holds one — see `togglePin`.
+  static let pinSlots = 1...9
+
+  /// What `togglePin` did, so the caller can say so. `slotsFull` is the only
+  /// outcome the user cannot see for themselves.
+  enum PinResult {
+    case pinned(slot: Int)
+    case unpinned
+    case slotsFull
+  }
+
+  /// FR-5.2's Option+P, both directions.
+  ///
+  /// Slot rules, which DECISIONS D-14 records and the PRD left open:
+  /// the lowest free slot is taken, so unpinning frees a number the next pin
+  /// reuses; a tenth pin is refused rather than pinned without a slot, because a
+  /// pin the shortcuts cannot reach is a pin that half works.
+  ///
+  /// One write transaction: reading the used slots and claiming one has to be
+  /// atomic, or two pins in the same millisecond both see the same gap and the
+  /// second hits the UNIQUE index.
+  @discardableResult
+  static func togglePin(id: Int64) -> PinResult {
+    let result = try? Database.shared.write { db -> PinResult in
+      let isPinned = try Bool.fetchOne(db, sql: "SELECT pinned FROM items WHERE id = ?", arguments: [id])
+      guard let isPinned else { return .unpinned }
+
+      if isPinned {
+        try db.execute(sql: "UPDATE items SET pinned = 0, pin_slot = NULL WHERE id = ?", arguments: [id])
+        return .unpinned
+      }
+
+      let used = Set(try Int.fetchAll(db, sql: "SELECT pin_slot FROM items WHERE pin_slot IS NOT NULL"))
+      guard let slot = pinSlots.first(where: { !used.contains($0) }) else { return .slotsFull }
+      try db.execute(
+        sql: "UPDATE items SET pinned = 1, pin_slot = ? WHERE id = ?",
+        arguments: [slot, id]
+      )
+      return .pinned(slot: slot)
+    }
+    return result ?? .slotsFull
+  }
+
+  /// Resolves one of FR-5.2's `Option+1..9` to the row it pastes. Nil when the
+  /// slot is empty, which is the common case for most of the nine — the shortcut
+  /// then does nothing rather than pasting something arbitrary.
+  static func pinnedItemID(slot: Int) -> Int64? {
+    try? Database.shared.read { db in
+      try Int64.fetchOne(db, sql: "SELECT id FROM items WHERE pin_slot = ?", arguments: [slot])
+    } ?? nil
   }
 
   static func markUsed(id: Int64) {

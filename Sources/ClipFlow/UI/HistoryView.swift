@@ -10,6 +10,11 @@ final class History {
   static let shared = History()
 
   var items: [ItemSummary] = []
+  /// Whether `items` currently holds search results. Drives FR-6.3's section
+  /// split, and is flipped alongside the results rather than read off the query
+  /// text — the search is debounced 40 ms, so the two disagree for long enough
+  /// to draw a "Pinned" header over a list of matches (DECISIONS D-4).
+  private(set) var isSearching = false
   private var task: Task<Void, Never>?
 
   private init() {
@@ -25,14 +30,16 @@ final class History {
 
     // A query of only punctuation reduces to nothing searchable, which shows the
     // unfiltered list rather than an empty one.
-    let request = SearchService.ftsQuery(from: query).map { SearchService.matching($0) }
-      ?? ItemSummary.recent()
+    let fts = SearchService.ftsQuery(from: query)
+    let request = fts.map { SearchService.matching($0) } ?? ItemSummary.recent()
+    let searching = fts != nil
 
     let observation = ValueObservation.tracking { db in try request.fetchAll(db) }
     task = Task { @MainActor [weak self] in
       do {
         for try await items in observation.values(in: Database.shared) {
           self?.items = items
+          self?.isSearching = searching
         }
       } catch is CancellationError {
         // Superseded by the next keystroke.
@@ -54,10 +61,23 @@ struct HistoryView: View {
   /// panel opens. Explicit state rather than a `Date.now` buried in each row, so
   /// SwiftUI can actually see it change and re-render.
   @State private var now = Date.now
+  /// Shown when a pin is refused. Only `slotsFull` sets it: pinning and
+  /// unpinning are both visible in the list on their own, but a tenth pin that
+  /// silently does nothing is indistinguishable from a broken shortcut
+  /// (DECISIONS D-14).
+  @State private var pinNotice: String?
 
   var body: some View {
     VStack(spacing: 0) {
       searchField
+      if let pinNotice {
+        Text(pinNotice)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal, 12)
+          .padding(.bottom, 6)
+      }
       Divider()
       if history.items.isEmpty {
         empty
@@ -74,6 +94,16 @@ struct HistoryView: View {
       try? await Task.sleep(for: .milliseconds(40))
       guard !Task.isCancelled else { return }
       history.observe(query: query)
+    }
+    // A refusal that never leaves stops reading as feedback about the key you
+    // just pressed and starts reading as a stuck error about the app. Same shape
+    // as the debounce above: a replacement notice cancels this sleep and starts a
+    // fresh ten seconds rather than stacking timers, and it dies with the view.
+    .task(id: pinNotice) {
+      guard pinNotice != nil else { return }
+      try? await Task.sleep(for: .seconds(10))
+      guard !Task.isCancelled else { return }
+      pinNotice = nil
     }
     .onKeyPress(.escape) {
       onClose()
@@ -101,6 +131,15 @@ struct HistoryView: View {
       delete(selection)
       return .handled
     }
+    // FR-5.2's Option+P. Option for the same reason Option+Delete needs it and
+    // Return does not: focus lives in the search field, so a bare P has to keep
+    // typing. Bound here *and* on the field below — whichever holds focus sees
+    // it first and returns .handled, so it never fires twice.
+    .onKeyPress(keys: ["p"]) { press in
+      guard press.modifiers.contains(.option), let selection else { return .ignored }
+      togglePin(selection)
+      return .handled
+    }
     .onReceive(NotificationCenter.default.publisher(for: .clipFlowOpenURL)) { _ in
       openSelectedURL()
     }
@@ -110,6 +149,7 @@ struct HistoryView: View {
       // never "this is where the cursor happens to be". Hover covers the latter.
       selection = nil
       query = ""
+      pinNotice = nil
     }
   }
 
@@ -135,6 +175,15 @@ struct HistoryView: View {
           guard !press.modifiers.isEmpty else { return .ignored }  // plain Return stays with onSubmit
           guard let target = selection ?? history.items.first?.id else { return .ignored }
           perform(target, modifiers: press.modifiers)
+          return .handled
+        }
+        // The focused field swallows key presses before the panel-level handler
+        // sees them, exactly as it does for a modified Return above.
+        .onKeyPress(keys: ["p"], phases: .down) { press in
+          guard press.modifiers.contains(.option),
+                let target = selection ?? history.items.first?.id
+          else { return .ignored }
+          togglePin(target)
           return .handled
         }
         .onSubmit {
@@ -196,6 +245,17 @@ struct HistoryView: View {
       selection = next?.id
     }
     ItemRepository.delete(id: itemID)
+  }
+
+  /// FR-5.2's Option+P. The list is a live observation, so pinning redraws
+  /// itself — the only outcome that needs saying out loud is the refusal.
+  private func togglePin(_ itemID: Int64) {
+    selection = itemID
+    guard case .slotsFull = ItemRepository.togglePin(id: itemID) else {
+      pinNotice = nil
+      return
+    }
+    pinNotice = "All \(ItemRepository.pinSlots.count) pin slots are in use — unpin one first."
   }
 
   private func copy(_ itemID: Int64) {
@@ -260,32 +320,28 @@ struct HistoryView: View {
     return modifiers
   }
 
+  /// FR-6.3: pinned section, then the flat history. Only while idle — a search
+  /// is one ranked list with pinned boosted instead, or a pinned match would be
+  /// drawn in both halves (DECISIONS D-4). `recent()` already emits the pinned
+  /// rows first, so this splits a prefix rather than re-sorting.
+  private var pinnedCount: Int {
+    history.isSearching ? 0 : history.items.prefix(while: \.pinned).count
+  }
+
   private var list: some View {
     // `selection` plus a focused List is what makes the arrow keys work; there
     // is no manual key handling here.
-    List(history.items, selection: $selection) { item in
-      ItemRow(item: item, now: now)
-        .tag(item.id)
-        // Single click, not double: picking a clipboard entry is the whole point
-        // of the panel being open, so there is nothing else a click would mean.
-        // contentShape makes the blank space in the row clickable too.
-        .contentShape(.rect)
-        .onTapGesture { copy(item.id) }
-        // Discoverable counterpart to Option+Delete, and the only route for
-        // anyone using the mouse.
-        .contextMenu {
-          Button("Copy") { copy(item.id) }
-          Button("Paste") { paste(item.id, plainText: false) }
-          Button("Paste as Plain Text") { paste(item.id, plainText: true) }
-          // Absent, not disabled, on rows without a link: the glyph already says
-          // which rows have one, and a permanently greyed entry on most rows is
-          // noise. Same reasoning as the status menu's "Enable Pasting…".
-          if item.hasURL {
-            Button("Open URL") { openURL(item.id) }
-          }
-          Divider()
-          Button("Delete", role: .destructive) { delete(item.id) }
+    List(selection: $selection) {
+      if pinnedCount > 0 {
+        Section("Pinned") {
+          ForEach(history.items.prefix(pinnedCount), content: row)
         }
+        Section {
+          ForEach(history.items.dropFirst(pinnedCount), content: row)
+        }
+      } else {
+        ForEach(history.items, content: row)
+      }
     }
     .listStyle(.sidebar)
     .scrollContentBackground(.hidden)
@@ -302,6 +358,34 @@ struct HistoryView: View {
         self.selection = nil
       }
     }
+  }
+
+  @ViewBuilder
+  private func row(_ item: ItemSummary) -> some View {
+    ItemRow(item: item, now: now)
+      .tag(item.id)
+      // Single click, not double: picking a clipboard entry is the whole point
+      // of the panel being open, so there is nothing else a click would mean.
+      // contentShape makes the blank space in the row clickable too.
+      .contentShape(.rect)
+      .onTapGesture { copy(item.id) }
+      // Discoverable counterpart to Option+Delete, and the only route for
+      // anyone using the mouse.
+      .contextMenu {
+        Button("Copy") { copy(item.id) }
+        Button("Paste") { paste(item.id, plainText: false) }
+        Button("Paste as Plain Text") { paste(item.id, plainText: true) }
+        // Absent, not disabled, on rows without a link: the glyph already says
+        // which rows have one, and a permanently greyed entry on most rows is
+        // noise. Same reasoning as the status menu's "Enable Pasting…".
+        if item.hasURL {
+          Button("Open URL") { openURL(item.id) }
+        }
+        Divider()
+        Button(item.pinned ? "Unpin" : "Pin") { togglePin(item.id) }
+        Divider()
+        Button("Delete", role: .destructive) { delete(item.id) }
+      }
   }
 
   private var empty: some View {
@@ -361,6 +445,18 @@ struct ItemRow: View {
       }
 
       Spacer(minLength: 8)
+
+      // The slot, not a pin glyph: the section header already says these rows
+      // are pinned, and the number is the part you cannot work out by looking —
+      // it is what Option+N pastes, and it does not follow list position
+      // (DECISIONS D-3).
+      if let slot = item.pinSlot {
+        Text("⌃⌘\(slot)")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+          .help("⌃⌘\(slot) pastes this without opening ClipFlow")
+          .fixedSize()
+      }
 
       // FR-6.4: the row holds a link, so Cmd+O does something here and nowhere
       // else. Needed on the row because the URL is often past the preview

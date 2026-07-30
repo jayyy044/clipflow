@@ -39,17 +39,25 @@ enum SearchService {
   /// `content` over `ocr_text`: a screenshot yields hundreds of OCR words and a
   /// commit hash yields one token, and unweighted length normalisation would let
   /// screenshots crowd out short text items (DECISIONS S-9).
+  ///
+  /// FR-3.3 boosts pinned rows above the rest, and this is the *only* place
+  /// pinning shows up while searching: one flat ranked list, no second section,
+  /// so a pinned row that matches the query renders once rather than twice
+  /// (DECISIONS D-4). Ahead of bm25, not folded into it — "pinned" is a decision
+  /// the user made and outranks a relevance score.
   static func matching(_ query: String, limit: Int = 500) -> SQLRequest<ItemSummary> {
     """
     SELECT i.id, i.kind, i.preview, i.image_path,
-           i.source_bundle_id, i.source_app_name, i.copied_at, i.last_used_at, i.ocr_status,
+           i.source_bundle_id, i.source_app_name, i.copied_at, i.last_used_at,
+           i.pinned, i.pin_slot, i.ocr_status,
            snippet(items_fts, 1, '', '', '…', 12) AS ocr_snippet,
            i.detected_urls,
            LENGTH(i.content) AS content_length
     FROM items i
     JOIN items_fts ON items_fts.rowid = i.id
     WHERE items_fts MATCH \(query)
-    ORDER BY bm25(items_fts, 1.0, 0.5),
+    ORDER BY i.pinned DESC,
+             bm25(items_fts, 1.0, 0.5),
              MAX(i.copied_at, COALESCE(i.last_used_at, i.copied_at)) DESC,
              i.id DESC
     LIMIT \(limit)

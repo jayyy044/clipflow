@@ -37,6 +37,12 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
   var copiedAt: Int64
   var lastUsedAt: Int64?
   var contentHash: String
+  /// FR-2.3. Carried on `Item` rather than only read by raw SQL because
+  /// `ItemRepository.save` round-trips an existing row through `update` on a
+  /// dedupe hit — a property missing here would be written back as its default
+  /// and re-copying a pinned item would silently unpin it (DECISIONS D-5b).
+  var pinned: Bool = false
+  var pinSlot: Int?
   var ocrStatus: OCRStatus = .na
   /// FR-5.1's JSON array of links. Nil only on image rows and on text rows that
   /// predate the column — `URLDetector.backfill()` clears the latter at launch.
@@ -60,6 +66,8 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
     case copiedAt = "copied_at"
     case lastUsedAt = "last_used_at"
     case contentHash = "content_hash"
+    case pinned
+    case pinSlot = "pin_slot"
     case ocrStatus = "ocr_status"
     case detectedURLs = "detected_urls"
   }
@@ -109,6 +117,11 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
   var sourceAppName: String?
   var copiedAt: Int64
   var lastUsedAt: Int64?
+  var pinned: Bool
+  /// The number `Option+N` pastes this row with (DECISIONS D-3), shown on the
+  /// row so the shortcut is discoverable rather than something you have to count
+  /// out. Non-nil exactly when `pinned` — see `ItemRepository.togglePin`.
+  var pinSlot: Int?
   var ocrStatus: OCRStatus
   /// The matching OCR line, when this row came back from a search (DECISIONS
   /// S-16). Nil for the unfiltered list, which has no query to snippet against.
@@ -132,6 +145,8 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
     case sourceAppName = "source_app_name"
     case copiedAt = "copied_at"
     case lastUsedAt = "last_used_at"
+    case pinned
+    case pinSlot = "pin_slot"
     case ocrStatus = "ocr_status"
     case ocrSnippet = "ocr_snippet"
     case detectedURLs = "detected_urls"
@@ -180,12 +195,22 @@ struct ItemSummary: Codable, Identifiable, Hashable, FetchableRecord {
     return "\(contentLength.formatted(.number.notation(.compactName))) chars"
   }
 
+  /// FR-6.3's two sections come out of one query, in the order they are drawn:
+  /// pinned rows first, by slot, then everything else newest-first. One array
+  /// keeps arrow-key navigation and the selection logic index-based across the
+  /// section boundary, and keeps a pinned row from appearing twice (DECISIONS
+  /// D-4). `pin_slot` is NULL on every unpinned row, so it only orders the
+  /// pinned group.
+  ///
+  /// By slot rather than by pin time, so the number on screen is the number
+  /// `Option+N` pastes (DECISIONS D-14).
   static func recent(limit: Int = 500) -> SQLRequest<ItemSummary> {
     """
     SELECT id, kind, preview, image_path, source_bundle_id, source_app_name, copied_at, last_used_at,
+           pinned, pin_slot,
            ocr_status, NULL AS ocr_snippet, detected_urls, LENGTH(content) AS content_length
     FROM items
-    ORDER BY \(sql: Item.orderBy)
+    ORDER BY pinned DESC, pin_slot ASC, \(sql: Item.orderBy)
     LIMIT \(limit)
     """
   }
