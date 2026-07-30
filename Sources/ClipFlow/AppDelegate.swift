@@ -47,6 +47,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // can arrive and try to insert into a table that doesn't exist yet.
     _ = Database.shared
     _ = History.shared
+    // FR-2.5: `retentionLimit` may have been lowered since the last run, and
+    // nothing else would bring the history back under it until the next copy.
+    ItemRepository.evictBeyondRetentionLimit()
     ImageStore.sweepOrphans(referencedBy: ItemRepository.imagePaths())
     PasteboardMonitor.shared.start()
     // FR-4.5: a queue interrupted by quitting left rows at 'pending'.

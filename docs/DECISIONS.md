@@ -319,6 +319,49 @@ thumbnails and history grow. The helper process is the upgrade path.
 
 ---
 
+## D-11: Code signing — free Apple Development identity
+
+Ad-hoc signing has no identity, so the binary's own hash serves as one and macOS
+treats every rebuild as an app it has never seen. Since the Accessibility grant
+is keyed on bundle id + signing identity, it would have to be re-issued after
+every single build — which makes Phase 4 (paste injection) miserable to develop.
+
+Fixed with a free "Apple Development" certificate from a normal Apple ID: Xcode →
+Settings → Apple Accounts → add account → Personal Team → Manage Certificates.
+No paid Developer Program. Result: `TeamIdentifier=D4YFLFJDBK` instead of
+`not set`, stable across rebuilds.
+
+**The actual blocker was not Xcode or the account.** The certificate existed and
+its private key was present — signing failed with:
+
+```
+unable to build chain to self-signed root for signer "Apple Development: ..."
+```
+
+The certificate is issued by `OU=G3`, and only the *original* WWDR intermediate
+was installed, expired Feb 2023. Apple's G3 intermediate
+(`https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer`, chains to Apple
+Root CA, valid to 2030) had to be added to the login keychain. Verify its subject
+matches the certificate's issuer before installing it.
+
+`security find-identity` reporting `0 valid identities found` is the symptom of a
+broken chain, not a missing certificate. `security find-certificate -c "Apple
+Development"` distinguishes the two.
+
+The Makefile discovers the identity rather than hardcoding it, so the repo — which
+is public — carries no email address, and still builds on a machine with no
+certificate by falling back to ad-hoc.
+
+First use of the key prompts for keychain access. Choose **Always Allow**; plain
+Allow is one-shot and the next build hangs on an invisible dialog.
+
+This identity signs locally only. Distributing to other people needs a Developer
+ID certificate and notarisation, which requires the paid program — see the
+distribution tiers discussion. Building from source stays free for anyone,
+because a locally built app is never quarantined.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a
@@ -405,6 +448,15 @@ nice-to-have.
 - **S-18. Swift 6 strict concurrency.** `VNImageRequestHandler` and `CGImage` are
   Sendable-hostile and `NSPasteboard` is main-actor-adjacent. Start at minimal
   strictness and tighten later rather than paying for it during feature work.
+- **S-18b. Retention N = 100, not FR-2.5's 1000.** Chosen by the user; kept as one
+  constant (`ItemRepository.retentionLimit`) rather than a setting, because
+  Phase 9 owns settings. Landed at 100 after 20 was flagged as too low for an app
+  whose G3 is finding a screenshot from last week — 20 is roughly a morning of
+  copying, which would leave the OCR search that justifies the whole build with
+  almost nothing to search. 100 costs nothing measurable: FR-2.5's own budget is
+  5 MB for 1000 text items, and the list is never scrolled that far because
+  retrieval goes through search. Eviction converges on the next launch, so
+  changing it again cleans up retroactively.
 
 ### Phase 9 (privacy, settings)
 

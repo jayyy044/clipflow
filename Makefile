@@ -1,6 +1,17 @@
 APP       := dist/ClipFlow.app
 BUNDLE_ID := com.jayyy044.clipflow
 
+# macOS keys the Accessibility grant on bundle id + signing identity. With an
+# ad-hoc signature there is no identity, so the binary's own hash serves as one
+# and every rebuild looks like an app that has never been granted anything —
+# meaning the grant has to be re-issued after each build (DECISIONS S-13).
+#
+# Discovered rather than hardcoded, so a machine without a Development
+# certificate still builds; it just falls back to ad-hoc and re-prompts.
+SIGN_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
+             | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)
+SIGN_ID := $(if $(SIGN_ID),$(SIGN_ID),-)
+
 .PHONY: all bundle run install uninstall debug clean
 
 all: bundle
@@ -14,10 +25,8 @@ bundle:
 	cp .build/release/ClipFlow $(APP)/Contents/MacOS/ClipFlow
 	cp Resources/Info.plist $(APP)/Contents/Info.plist
 	printf 'APPL????' > $(APP)/Contents/PkgInfo
-	# ponytail: ad-hoc signature. Good enough to launch, but the hash changes
-	# every build, so macOS revokes the Accessibility grant each time. Swap the
-	# `-` for a real "Apple Development" identity before Phase 4 (DECISIONS S-13).
-	codesign --force --sign - --identifier $(BUNDLE_ID) $(APP)
+	@echo "signing as: $(SIGN_ID)"
+	codesign --force --sign "$(SIGN_ID)" --identifier $(BUNDLE_ID) $(APP)
 
 run: bundle
 	-pkill -x ClipFlow

@@ -171,6 +171,11 @@ enum Database {
 }
 
 enum ItemRepository {
+  /// FR-2.5's N. Below the PRD's default of 1000 — the one number to change,
+  /// here, until Phase 9 owns settings. Eviction converges on the next launch,
+  /// so lowering it later cleans up retroactively.
+  static let retentionLimit = 100
+
   /// Insert, or bump whichever existing row already holds this content —
   /// anywhere in the history, not just the newest one. Bumping `last_used_at`
   /// floats it back to the top, since ordering is max(copied_at, last_used_at).
@@ -187,6 +192,37 @@ enum ItemRepository {
       }
       try item.insert(db)
     }
+    evictBeyondRetentionLimit()
+  }
+
+  /// FR-2.5. Runs after every insert and once at launch, so lowering
+  /// `retentionLimit` converges on the next run rather than only as new items
+  /// arrive. Not on a timer: nothing changes between writes.
+  ///
+  /// The OFFSET is over `Item.orderBy` — the list's own ordering — because
+  /// anything else would evict a row still visible near the top. Deleting by
+  /// subquery rather than fetching candidates keeps the history off the heap
+  /// (DECISIONS D-9).
+  ///
+  /// TODO(Phase 9): pinned rows are never evicted (FR-2.5). There is no `pinned`
+  /// column yet; when there is, exclude it from the subquery *and* from the
+  /// count, or a full set of pins would evict everything else.
+  static func evictBeyondRetentionLimit() {
+    let evicted = try? Database.shared.write { db -> Int in
+      try db.execute(sql: """
+        DELETE FROM items WHERE id IN (
+          SELECT id FROM items
+          ORDER BY \(Item.orderBy)
+          LIMIT -1 OFFSET \(retentionLimit)
+        )
+        """)
+      return db.changesCount
+    }
+    // Same order as `delete(id:)`: rows first, then sweep against what is
+    // actually left. Skipped when nothing went, so an ordinary copy does not pay
+    // for a directory listing.
+    guard (evicted ?? 0) > 0 else { return }
+    ImageStore.sweepOrphans(referencedBy: imagePaths())
   }
 
   /// Bumps an existing row by hash, reporting whether it found one.
