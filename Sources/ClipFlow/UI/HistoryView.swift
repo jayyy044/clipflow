@@ -57,14 +57,34 @@ struct HistoryView: View {
       copy(selection)
       return .handled
     }
+    // With nothing preselected, the arrow keys have no starting point, so the
+    // first press has to create one. Once a row is selected the List handles
+    // subsequent presses itself, hence .ignored.
+    .onKeyPress(.downArrow) { enterList(from: .first) }
+    .onKeyPress(.upArrow) { enterList(from: .last) }
     .onReceive(NotificationCenter.default.publisher(for: .clipFlowPanelDidOpen)) { _ in
       now = .now
+      // Opens with nothing selected: blue means "this is what you just picked",
+      // never "this is where the cursor happens to be". Hover covers the latter.
+      selection = nil
     }
   }
 
+  private enum ListEnd { case first, last }
+
+  private func enterList(from end: ListEnd) -> KeyPress.Result {
+    guard selection == nil else { return .ignored }
+    selection = end == .first ? history.items.first?.id : history.items.last?.id
+    return .handled
+  }
+
   private func copy(_ itemID: Int64) {
+    // Highlight first, close second. The clipboard write happens immediately —
+    // only the dismissal waits, long enough for the blue to register as
+    // confirmation of what was picked. Short enough not to feel like lag.
+    selection = itemID
     Clipboard.copy(itemID: itemID)
-    onClose()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { onClose() }
   }
 
   private var list: some View {
@@ -80,15 +100,14 @@ struct HistoryView: View {
         .onTapGesture { copy(item.id) }
     }
     .listStyle(.sidebar)
-    // onAppear alone isn't enough: the observation often delivers rows after the
-    // view appears, so the first render has nothing to select.
-    .onAppear { selectNewestIfNeeded() }
-    .onChange(of: history.items) { selectNewestIfNeeded() }
-  }
-
-  private func selectNewestIfNeeded() {
-    guard selection == nil || !history.items.contains(where: { $0.id == selection }) else { return }
-    selection = history.items.first?.id
+    // Nothing is auto-selected any more, but a selected row can still disappear
+    // underneath us — evicted by retention, or merged away by dedupe — and a
+    // selection pointing at a gone row would let Enter copy nothing.
+    .onChange(of: history.items) {
+      if let selection, !history.items.contains(where: { $0.id == selection }) {
+        self.selection = nil
+      }
+    }
   }
 
   private var empty: some View {
@@ -107,11 +126,13 @@ struct ItemRow: View {
   let item: ItemSummary
   let now: Date
 
+  @State private var isHovered = false
+
   var body: some View {
     HStack(spacing: 8) {
       Image(nsImage: AppIcon.forBundleID(item.sourceBundleID))
         .resizable()
-        .frame(width: 16, height: 16)
+        .frame(width: 20, height: 20)
 
       // FR-6.4/FR-6.7: image rows show the thumbnail in place of preview text.
       // The text is still the fallback, which is what a missing or unwritable
@@ -120,8 +141,12 @@ struct ItemRow: View {
         Image(nsImage: thumbnail)
           .resizable()
           .aspectRatio(contentMode: .fit)
-          .frame(maxWidth: 96, maxHeight: 24)
-          .clipShape(.rect(cornerRadius: 2))
+          // alignment: .leading is the fix for thumbnails appearing indented —
+          // a frame centres its content by default, so a 36pt-wide image inside a
+          // 96pt box sat 30pt from the app icon. maxWidth still has to cap it, or
+          // a very wide screenshot would push the timestamp off the row.
+          .frame(maxWidth: 140, maxHeight: 26, alignment: .leading)
+          .clipShape(.rect(cornerRadius: 3))
       } else {
         Text(item.preview)
           .lineLimit(1)
@@ -135,7 +160,17 @@ struct ItemRow: View {
         .foregroundStyle(.secondary)
         .fixedSize()
     }
-    .padding(.vertical, 2)
+    .padding(.vertical, 3)
+    .padding(.horizontal, 6)
+    .background {
+      // Deliberately much weaker than the selection fill, so hover reads as
+      // "the mouse is here" and not as "this is what Enter will copy".
+      RoundedRectangle(cornerRadius: 6)
+        .fill(.primary.opacity(isHovered ? 0.09 : 0))
+    }
+    .contentShape(.rect)
+    .onHover { isHovered = $0 }
+    .animation(.easeOut(duration: 0.12), value: isHovered)
   }
 
   /// A `FormatStyle` rather than a shared `RelativeDateTimeFormatter`: value
