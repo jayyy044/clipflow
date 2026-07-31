@@ -193,7 +193,7 @@ private struct ShortcutSettings: View {
       } header: {
         Text("Pin Slots")
       } footer: {
-        Text("Each slot pastes its pinned item without opening ClipFlow. Empty slots do nothing.")
+        Text("Each slot pastes its pinned item without opening ClipFlow")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -246,7 +246,7 @@ private struct ExclusionSettings: View {
         }
       }
 
-      Button("Add App…", action: pickApps)
+      Button("Add App", action: pickApps)
     }
     .padding(4)
   }

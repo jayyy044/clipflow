@@ -227,8 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // by re-pinning and deletes nothing, so it sits above the two that do — and
     // it is the only one without an ellipsis, because it does not ask.
     add("Unpin All", #selector(unpinAll))
-    add("Clear Unpinned History…", #selector(clearUnpinnedHistory))
-    add("Clear All History…", #selector(clearAllHistory))
+    add("Clear History", #selector(clearHistory))
     menu.addItem(.separator())
     add("Settings…", #selector(openSettings))
     menu.addItem(.separator())
@@ -267,34 +266,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ItemRepository.unpinAll()
   }
 
-  /// FR-7.5, first of two. Irreversible and unbounded, so it confirms — and says
-  /// how much is about to go, because "clear history" reads very differently at
-  /// 3 items than at 900. Naming what *survives* is the point of this one: it is
-  /// the only thing that distinguishes it from the action underneath it.
-  @objc private func clearUnpinnedHistory() {
+  /// One clear action, not FR-7.5's two, and it never touches pinned items.
+  ///
+  /// A separate "clear everything including pinned" was built and removed: two
+  /// near-identically named destructive entries invite picking the wrong one, and
+  /// the one that eats your pins is the expensive mistake. Unpin All followed by
+  /// this reaches the same end state deliberately, in two steps that each say
+  /// what they do.
+  ///
+  /// Still confirms — irreversible and unbounded — and states the count, because
+  /// "clear history" reads very differently at 3 items than at 900. It names what
+  /// survives so pinned items are visibly out of scope.
+  @objc private func clearHistory() {
     let counts = ItemRepository.counts()
     let unpinned = counts.total - counts.pinned
     guard confirm(
-      "Clear unpinned clipboard history?",
+      "Clear clipboard history?",
       detail: "\(Self.items(unpinned)) and any stored images will be permanently deleted. "
         + (counts.pinned == 0 ? "Nothing is pinned." : "\(Self.items(counts.pinned)) pinned will be kept."),
-      action: "Clear Unpinned"
+      action: "Clear"
     ) else { return }
     ItemRepository.deleteUnpinned()
-  }
-
-  /// FR-7.5, second of two. Pins are named separately in the text: a user who
-  /// pinned nine things does not expect them in scope, and this is the action
-  /// where they are.
-  @objc private func clearAllHistory() {
-    let counts = ItemRepository.counts()
-    guard confirm(
-      "Clear all clipboard history?",
-      detail: "\(Self.items(counts.total)) and any stored images will be permanently deleted"
-        + (counts.pinned == 0 ? "." : ", including \(Self.items(counts.pinned)) pinned."),
-      action: "Clear Everything"
-    ) else { return }
-    ItemRepository.deleteAll()
   }
 
   private func confirm(_ message: String, detail: String, action: String) -> Bool {

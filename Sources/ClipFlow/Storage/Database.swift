@@ -412,21 +412,14 @@ enum ItemRepository {
     ImageStore.sweepOrphans(referencedBy: imagePaths())
   }
 
-  /// FR-7.5's destructive clear. Callers are responsible for confirming first.
-  static func deleteAll() {
-    try? Database.shared.write { db in
-      try db.execute(sql: "DELETE FROM items")
-    }
-    // With no rows left, every file in the directory is an orphan.
-    ImageStore.sweepOrphans(referencedBy: [])
-  }
-
-  /// FR-7.5's other half. A separate action rather than a checkbox on one alert:
-  /// the two differ in what they destroy, and a checkbox is the kind of state a
-  /// user misremembers exactly once.
+  /// The only bulk clear, and it never touches pinned rows. A
+  /// delete-everything-including-pinned variant existed and was removed: two
+  /// near-identically named destructive menu entries invite picking the wrong
+  /// one. `unpinAll()` then this reaches the same end state in two steps that
+  /// each say what they do.
   ///
-  /// The sweep is against what is left, not against the empty set — pinned rows
-  /// keep their images, which is the whole difference from `deleteAll`.
+  /// Callers confirm first. The sweep runs against what is left rather than the
+  /// empty set, so pinned rows keep their images.
   static func deleteUnpinned() {
     try? Database.shared.write { db in
       try db.execute(sql: "DELETE FROM items WHERE pinned = 0")
