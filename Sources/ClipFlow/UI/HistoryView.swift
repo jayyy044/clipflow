@@ -142,8 +142,9 @@ struct HistoryView: View {
     // ever sees it.
     // Option is required: focus lives in the search field, so plain Delete has to
     // keep editing the query (FR-5.2).
-    .onKeyPress(keys: [.delete, .deleteForward]) { press in
-      guard press.modifiers.contains(.option), let selection else { return .ignored }
+    .onKeyPress(phases: .down) { press in
+      guard Self.isDelete(press), press.modifiers.contains(.option), let selection
+      else { return .ignored }
       delete(selection)
       return .handled
     }
@@ -201,6 +202,22 @@ struct HistoryView: View {
                 let target = selection ?? history.items.first?.id
           else { return .ignored }
           togglePin(target)
+          return .handled
+        }
+        // Same trap as the two above, and the reason Option+Delete never worked at
+        // all: bound only on the panel, which the focused field never lets the
+        // event reach. Return and Option+P were each fixed this way after being
+        // found dead; Delete was simply missed.
+        //
+        // No `?? history.items.first?.id` fallback here, unlike Return and P. With
+        // nothing selected those two act on the top row because acting on the top
+        // result is what the user meant — pasting it, pinning it. Deleting it is
+        // not: a key that silently destroys whatever happens to be first is worse
+        // than one that does nothing. An explicit selection is required.
+        .onKeyPress(phases: .down) { press in
+          guard Self.isDelete(press), press.modifiers.contains(.option), let selection
+          else { return .ignored }
+          delete(selection)
           return .handled
         }
         .onSubmit {
@@ -360,6 +377,23 @@ struct HistoryView: View {
     // confirmation, and there is no highlight worth holding the panel open for.
     onClose()
     return true
+  }
+
+  /// Matched by character rather than through `onKeyPress(keys:)`, because that
+  /// filter does not fire for Delete — measured, not guessed. A probe on the same
+  /// event reported `key=KeyEquivalent(character: "\u{7F}")` with `.option` set
+  /// and a row selected, while a handler registered as
+  /// `keys: [.delete, .deleteForward]` was never called at all.
+  ///
+  /// This is the whole of the "Option+Delete does nothing" bug. Both bindings were
+  /// written the same way, so neither has ever fired, and the focus story that
+  /// explains Return and Option+P — the field swallowing events before the panel
+  /// sees them — was never the cause here.
+  ///
+  /// U+007F is Delete (Backspace); U+F728 is `NSDeleteFunctionKey`, forward delete.
+  private static func isDelete(_ press: KeyPress) -> Bool {
+    guard let scalar = press.characters.unicodeScalars.first else { return false }
+    return scalar.value == 0x7F || scalar.value == 0xF728
   }
 
   private static func modifiers(from flags: NSEvent.ModifierFlags) -> EventModifiers {

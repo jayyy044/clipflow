@@ -1100,6 +1100,36 @@ than re-argued.
 
 ---
 
+## D-28: `onKeyPress(keys:)` never matches Delete — the whole of "Option+Delete does nothing"
+
+Option+Delete had never worked. The standing theory was the focus story that
+explains Return and Option+P: focus lives permanently in the search field, the
+field consumes events before the panel sees them, and each of those two was fixed
+by binding it on the field as well. Delete was assumed to have simply been missed.
+
+Binding it on the field changed nothing, so the theory was wrong. A probe on the
+same key press, with an unfiltered `onKeyPress(phases:)` on the field, reported:
+
+    key=KeyEquivalent(character: "\u{7F}")  mods=EventModifiers(rawValue: 8)  selection=Optional(1)
+
+All three guard conditions satisfied — the key is Delete, `.option` is set (raw 8),
+a row is selected. A handler registered as `keys: [.delete, .deleteForward]` on the
+same view, for the same event, **was never called at all**. Not a guard failing:
+the `keys:` filter does not match.
+
+So both bindings are matched by character instead. U+007F is Delete (Backspace),
+U+F728 is `NSDeleteFunctionKey`. Verified by driving the real key press: with a
+write lock held, `delete(id:) failed: SQLite error 5` and the row survived; with
+the lock released, the same keystroke took the table from 5 rows to 4.
+
+The generalisable part is the method, not the fix. Three separate key bindings in
+this app have now been found dead *after* looking correct — Cmd+O never reaching
+SwiftUI, Option+Enter eaten by the field, and this. Every one was found by a bug
+report and confirmed by instrumenting the actual event, never by reading. A key
+binding in this file is not working because it compiles.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a
