@@ -12,49 +12,68 @@ final class OCRQueue {
   /// the 60 MB budget for however long Vision took, and nobody searches one.
   private static let maxEdgePixels = 8000
 
-  // ponytail: one lock around a single bool, guaranteeing at most one drain in
-  // flight. `OSAllocatedUnfairLock` rather than `NSLock` because this is taken
-  // from an async context, where NSLock is unavailable.
-  private let running = OSAllocatedUnfairLock(initialState: false)
+  // ponytail: one lock around two bools, guaranteeing at most one drain in
+  // flight without ever holding the lock across a SELECT. `running` is the
+  // drain; `woken` records that someone asked for one since the current scan
+  // began. Invariant: a `wake()` that lands after the drain's last SELECT
+  // leaves `woken` set, so the drain rescans instead of standing down — the
+  // stranded-row race the old re-check-under-the-lock closed, minus the I/O
+  // inside the critical section (an unfair lock is a spinlock; SQLite is not
+  // arbitrary-work-safe under one).
+  private let state = OSAllocatedUnfairLock(initialState: (running: false, woken: false))
+
+  /// The drain, off both the main thread and the cooperative pool. `process`
+  /// blocks on a pipe read and `waitUntilExit` for up to 30 s, which is exactly
+  /// what the cooperative pool's threads are not allowed to do. .utility keeps a
+  /// burst of screenshots from competing with the poller (FR-4.4).
+  private let queue = DispatchQueue(label: "com.clipflow.ocr", qos: .utility)
 
   private init() {}
 
   /// Starts the drain if it isn't already going. Called on launch for leftover
   /// work (FR-4.5) and after each image capture for new work.
   func wake() {
-    let started = running.withLock { running -> Bool in
-      guard !running else { return false }
-      running = true
+    let started = state.withLock { state -> Bool in
+      state.woken = true
+      guard !state.running else { return false }
+      state.running = true
       return true
     }
     guard started else { return }
 
-    // Detached rather than a child task: the caller is the main actor, and a
-    // task inheriting that context would put Vision on the UI thread. .utility
-    // is what keeps a burst of screenshots from competing with the poller.
-    Task.detached(priority: .utility) { [self] in
+    queue.async { [self] in
       while true {
+        // Consumed *before* the scan: anything that arrives from here on sets
+        // it again and keeps the drain alive for another pass.
+        state.withLock { $0.woken = false }
         while let job = ItemRepository.nextPendingOCR() {
           // Standing down mid-drain leaves the row 'pending' — see `process`.
-          // The lock has to be cleared on the way out or a later `wake()` would
+          // `running` has to be cleared on the way out or a later `wake()` would
           // see a drain that is no longer running and never start one.
           guard process(id: job.id, imagePath: job.imagePath) else {
-            running.withLock { $0 = false }
+            state.withLock { $0.running = false }
             return
           }
         }
-        // Re-check under the lock before standing down. A capture that commits
-        // its row after the SELECT above but before `running` clears would see
-        // running == true, return early, and strand that row until next launch.
-        let more = running.withLock { running -> Bool in
-          guard ItemRepository.nextPendingOCR() == nil else { return true }
-          running = false
-          return false
+        let done = state.withLock { state -> Bool in
+          guard !state.woken else { return false }
+          state.running = false
+          return true
         }
-        guard more else { return }
+        guard !done else { return }
       }
     }
   }
+
+  /// Kills any helper still running, and keeps the drain from starting another.
+  ///
+  /// A `Process` child outlives its parent on macOS, and the 30 s deadline is a
+  /// `DispatchWorkItem` in *this* process — so quitting mid-recognition orphans
+  /// the helper with no watchdog left, holding an open descriptor on an image
+  /// out of the user's clipboard history. Must be called from
+  /// `applicationWillTerminate`. Safe if never called, safe if called twice, and
+  /// does not block: SIGTERM has been delivered by the time it returns.
+  func shutdown() { OCRHelper.shutdown() }
 
   /// False means "stand down and leave this row pending" — the helper is not
   /// there at all, so no image can be read and burning the whole queue on
@@ -78,6 +97,11 @@ final class OCRQueue {
     do {
       let text = try OCRHelper.text(in: url)
       ItemRepository.finishOCR(id: id, text: text, status: .done)
+    } catch OCRHelper.Failure.cancelled {
+      // Quitting is not the item's fault. FR-4.3's one-attempt rule is about
+      // images Vision cannot read; failing this row would spend the attempt on
+      // a helper we killed ourselves, so it stays 'pending' for FR-4.5.
+      return false
     } catch OCRHelper.Failure.missing {
       // A build that shipped without the helper is a packaging mistake, and it
       // is fixable — unlike FR-4.3's `failed`, which is terminal. Marking every
@@ -112,9 +136,29 @@ enum OCRHelper {
     /// because the two deserve opposite treatment — see `OCRQueue.process`.
     case missing
     case exited(code: Int32)
+    /// The app is quitting and we killed the helper. Leaves the row 'pending'
+    /// for the same reason `missing` does — see `OCRQueue.process`.
+    case cancelled
   }
 
   private static let name = "ClipFlowOCR"
+
+  // The live child, so `shutdown()` can reach it. Swift 5 language mode (S-18),
+  // and the only readers are the single drain queue and the terminating main
+  // thread, so a lock and two vars beat any of the Sendable-shaped alternatives.
+  private static let lock = NSLock()
+  private static var current: Process?
+  private static var shuttingDown = false
+
+  /// Idempotent. Terminating a `Process` that was never launched raises an
+  /// ObjC exception, so `text(in:)` only ever registers one after `run()`.
+  static func shutdown() {
+    lock.lock()
+    shuttingDown = true
+    let child = current
+    lock.unlock()
+    child?.terminate()
+  }
 
   /// Generous against D-8's measured 0.22–0.40 s, because this also covers a
   /// process spawn and a cold model load. Its only job is to stop a wedged
@@ -131,9 +175,10 @@ enum OCRHelper {
     return FileManager.default.isExecutableFile(atPath: helper.path) ? helper : nil
   }
 
-  // ponytail: blocking, not async. It is called from the one detached drain task
-  // and there is never a second recognition in flight, so an async wrapper would
-  // be plumbing around a queue that is already serial by construction.
+  // ponytail: blocking, not async — and it must stay off the cooperative pool
+  // for that reason. It is called from the one serial drain queue and there is
+  // never a second recognition in flight, so an async wrapper would be plumbing
+  // around a queue that is already serial by construction.
   static func text(in image: URL) throws -> String {
     guard let helper = url else { throw Failure.missing }
 
@@ -148,6 +193,14 @@ enum OCRHelper {
     process.standardError = FileHandle.standardError
     try process.run()
 
+    // Registered after run(), never before. A shutdown that lands in the gap is
+    // caught by the flag and terminated here instead.
+    lock.lock()
+    current = process
+    let alreadyQuitting = shuttingDown
+    lock.unlock()
+    if alreadyQuitting { process.terminate() }
+
     // terminate() closes the child's end of the pipe, which is what releases the
     // read below — without it a wedged helper blocks this thread indefinitely.
     let deadline = DispatchWorkItem { process.terminate() }
@@ -158,6 +211,14 @@ enum OCRHelper {
     let data = output.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     deadline.cancel()
+
+    lock.lock()
+    current = nil
+    let cancelled = shuttingDown
+    lock.unlock()
+    // Only when it did not finish on its own: a helper that exited 0 before the
+    // quit landed produced real text, and throwing that away would be a loss.
+    if cancelled && process.terminationStatus != 0 { throw Failure.cancelled }
 
     guard process.terminationStatus == 0 else {
       throw Failure.exited(code: process.terminationStatus)

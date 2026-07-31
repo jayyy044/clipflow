@@ -340,6 +340,17 @@ final class PasteboardMonitor {
 
     let now = Int64(Date().timeIntervalSince1970 * 1000)
 
+    // Everything below runs on the main actor: a TIFF→PNG transcode, SHA-256 over
+    // up to 32 MB, a write to disk plus a re-read for the thumbnail, the insert
+    // with its FTS trigger, and retention eviction. §6 has no budget for any of
+    // it — the D-21 table measures launch, search and hotkey latency and stops.
+    // Whether that matters is a question about a number nobody has taken, so take
+    // it rather than refactoring on a hunch: the visible symptom would be the
+    // hotkey going unresponsive for a beat right after copying a big screenshot.
+    let started = ContinuousClock.now
+    var captured = "nothing"
+    defer { Timing.since(started, "capture (\(captured))") }
+
     // FR-1.2's priority order, applied as a fixed sequence rather than by asking
     // the pasteboard what it prefers. Copying from Word or a browser puts PNG,
     // TIFF, RTF and plain text down at once, and the same copy has to classify
@@ -349,6 +360,7 @@ final class PasteboardMonitor {
     // Written as one it inserted a stray text row every time a screenshot was
     // re-copied, because the dedupe hit looked the same as "no image here".
     if let png = pngFromPasteboard() {
+      captured = "image \(png.count / 1024)KB"
       guard let item = imageItem(png: png, app: app, at: now) else { return }
       ItemRepository.save(item)
       // FR-4.1: the row is enqueued by being inserted 'pending'; this only tells
@@ -358,6 +370,7 @@ final class PasteboardMonitor {
       return
     }
 
+    captured = "text"
     guard let item = textItem(app: app, at: now) else { return }
     ItemRepository.save(item)
   }

@@ -103,6 +103,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSLog("ClipFlow: accessibility \(Paster.isTrusted ? "granted, paste enabled" : "not granted, paste falls back to copy")")
   }
 
+  /// The OCR helper is a `Process` child, and on macOS those outlive their parent
+  /// (DECISIONS D-18). Nothing killed it, and the 30 s watchdog that would have is
+  /// a `DispatchWorkItem` living here — so it died with us and left a *wedged*
+  /// helper running with no watchdog at all, holding an open descriptor on a
+  /// clipboard image indefinitely. Which is exactly the data this app is supposed
+  /// to be careful with.
+  ///
+  /// Only signals and returns, so there is no ordering constraint against anything
+  /// else that wants to run at quit.
+  func applicationWillTerminate(_ notification: Notification) {
+    OCRQueue.shared.shutdown()
+  }
+
   /// A clipboard manager that isn't running has lost history you can never get
   /// back, so this is on by default rather than opt-in — but exactly once.
   ///
@@ -290,7 +303,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// "clear history" reads very differently at 3 items than at 900. It names what
   /// survives so pinned items are visibly out of scope.
   @objc private func clearHistory() {
-    let counts = ItemRepository.counts()
+    // Unknown is not zero. A failed read used to come back as (0, 0), so this
+    // offered to clear "0 items", the user confirmed *that*, and the delete then
+    // ran against everything there actually was — a destructive action confirmed
+    // against a number that was never true, which is the one outcome a
+    // confirmation exists to prevent. Nothing is deleted when the count is
+    // unknown, because there is no honest sentence to put in the dialog.
+    guard let counts = ItemRepository.counts() else {
+      notify(
+        "ClipFlow couldn't read your clipboard history",
+        detail: "Nothing has been deleted. Quit and reopen ClipFlow, then try again."
+      )
+      return
+    }
     let unpinned = counts.total - counts.pinned
     guard confirm(
       "Clear clipboard history?",
@@ -298,7 +323,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         + (counts.pinned == 0 ? "Nothing is pinned." : "\(Self.items(counts.pinned)) pinned will be kept."),
       action: "Clear"
     ) else { return }
-    ItemRepository.deleteUnpinned()
+    // The user was told this would delete their history. Silently not doing it
+    // leaves them believing it is gone, which for a clipboard history is a
+    // privacy consequence rather than a cosmetic one.
+    guard ItemRepository.deleteUnpinned() else {
+      notify(
+        "ClipFlow couldn't clear your history",
+        detail: "The change could not be saved, so your history is unchanged."
+      )
+      return
+    }
+  }
+
+  /// A failure the user has to be told about, as opposed to `confirm`'s question.
+  /// Only used where the alternative is the user believing something happened
+  /// that did not — a destructive action they confirmed, or a count they were
+  /// shown. Ordinary failures log and stay quiet.
+  private func notify(_ message: String, detail: String) {
+    let alert = NSAlert()
+    alert.messageText = message
+    alert.informativeText = detail
+    alert.addButton(withTitle: "OK")
+    NSApp.activate(ignoringOtherApps: true)
+    alert.runModal()
   }
 
   private func confirm(_ message: String, detail: String, action: String) -> Bool {

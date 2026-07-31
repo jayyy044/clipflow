@@ -71,22 +71,23 @@ struct HistoryView: View {
   /// panel opens. Explicit state rather than a `Date.now` buried in each row, so
   /// SwiftUI can actually see it change and re-render.
   @State private var now = Date.now
-  /// Shown when a pin is refused. Only `slotsFull` sets it: pinning and
-  /// unpinning are both visible in the list on their own, but a tenth pin that
-  /// silently does nothing is indistinguishable from a broken shortcut
-  /// (DECISIONS D-14).
-  @State private var pinNotice: String?
+  /// Shown when an action the user took did not do what pressing the key implies.
+  /// Pinning and deleting are both visible in the list on their own, so success
+  /// says nothing here — it is only the cases that silently do nothing that are
+  /// indistinguishable from a broken shortcut: a tenth pin with no free slot
+  /// (DECISIONS D-14), and a pin or delete whose write failed.
+  @State private var notice: String?
   /// Bumped every time a notice is raised, and used as the dismissal task's id.
   /// Keying that task off the message text instead would not restart it on a
   /// second refusal — the string is identical, so SwiftUI sees no change and the
   /// notice expires ten seconds after the *first* one rather than the latest.
-  @State private var pinNoticeToken = 0
+  @State private var noticeToken = 0
 
   var body: some View {
     VStack(spacing: 0) {
       searchField
-      if let pinNotice {
-        Text(pinNotice)
+      if let notice {
+        Text(notice)
           .font(.caption)
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, alignment: .leading)
@@ -114,11 +115,11 @@ struct HistoryView: View {
     // just pressed and starts reading as a stuck error about the app. Same shape
     // as the debounce above: a replacement notice cancels this sleep and starts a
     // fresh ten seconds rather than stacking timers, and it dies with the view.
-    .task(id: pinNoticeToken) {
-      guard pinNotice != nil else { return }
+    .task(id: noticeToken) {
+      guard notice != nil else { return }
       try? await Task.sleep(for: .seconds(10))
       guard !Task.isCancelled else { return }
-      pinNotice = nil
+      notice = nil
     }
     .onKeyPress(.escape) {
       onClose()
@@ -164,7 +165,7 @@ struct HistoryView: View {
       // never "this is where the cursor happens to be". Hover covers the latter.
       selection = nil
       query = ""
-      pinNotice = nil
+      notice = nil
     }
   }
 
@@ -260,19 +261,41 @@ struct HistoryView: View {
       let next = history.items[(index + 1)...].first ?? history.items[..<index].last
       selection = next?.id
     }
-    ItemRepository.delete(id: itemID)
+    // The row staying put is the only other signal a failed delete gives, and the
+    // list is a live observation — so it simply does not move, which reads as the
+    // key not working. Worse than that, deleting an item is how you get rid of
+    // something you did not want kept, and believing that worked when it did not
+    // is the failure that actually costs the user something.
+    guard ItemRepository.delete(id: itemID) else {
+      raise("Couldn't delete that item — the change wasn't saved.")
+      return
+    }
+    notice = nil
   }
 
   /// FR-5.2's Option+P. The list is a live observation, so pinning redraws
   /// itself — the only outcome that needs saying out loud is the refusal.
+  /// A `switch` rather than the old `guard case .slotsFull`, because a failed
+  /// write used to be reported as `.slotsFull` — telling the user all nine slots
+  /// were taken when the change simply had not been saved. Now that the two are
+  /// distinguishable they have to be said differently, and falling through to
+  /// silence on `.failed` would leave the same "broken shortcut" impression the
+  /// notice exists to prevent.
   private func togglePin(_ itemID: Int64) {
     selection = itemID
-    guard case .slotsFull = ItemRepository.togglePin(id: itemID) else {
-      pinNotice = nil
-      return
+    switch ItemRepository.togglePin(id: itemID) {
+    case .pinned, .unpinned:
+      notice = nil
+    case .slotsFull:
+      raise("All \(ItemRepository.pinSlots.count) pin slots are in use — unpin one first.")
+    case .failed:
+      raise("Couldn't pin that item — the change wasn't saved.")
     }
-    pinNotice = "All \(ItemRepository.pinSlots.count) pin slots are in use — unpin one first."
-    pinNoticeToken += 1
+  }
+
+  private func raise(_ message: String) {
+    notice = message
+    noticeToken += 1
   }
 
   private func copy(_ itemID: Int64) {

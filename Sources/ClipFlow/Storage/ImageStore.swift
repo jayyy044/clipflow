@@ -34,6 +34,16 @@ enum ImageStore {
     Database.directory.appending(path: relativePath)
   }
 
+  /// Whether the row that names this path can still deliver anything. A PNG can
+  /// go missing without its row going with it — a partial restore that brought
+  /// back the database but not `images.noindex` (DECISIONS D-15), a user tidying
+  /// the directory, an interrupted write — and the row is then permanently dead:
+  /// it copies nothing and, since D-23, pastes nothing. Used by the dedupe path,
+  /// which must not treat such a row as a hit.
+  static func exists(_ relativePath: String) -> Bool {
+    FileManager.default.fileExists(atPath: url(for: relativePath).path)
+  }
+
   /// Writes the PNG plus its thumbnail and returns the path to record on the row.
   /// The thumbnail is generated here, at insert time, rather than lazily in the
   /// list (PRD HP-5) and lands next to the original so it survives relaunch

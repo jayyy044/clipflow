@@ -384,6 +384,14 @@ enum ItemRepository {
   /// Insert, or bump whichever existing row already holds this content —
   /// anywhere in the history, not just the newest one. Bumping `last_used_at`
   /// floats it back to the top, since ordering is max(copied_at, last_used_at).
+  ///
+  /// A dedupe hit on an image row whose file is gone is *repaired* rather than
+  /// merely bumped: the caller has just written a fresh copy of the identical
+  /// bytes, so the row is adopted onto the new path instead of a second row
+  /// being inserted for content that already has one. Repair rather than
+  /// insert-and-delete because the row's identity is worth keeping — its pin
+  /// slot, its "first seen" `copied_at`, and its id, which the panel may have
+  /// selected.
   static func save(_ item: Item) {
     var item = item
     Database.write("save") { db in
@@ -392,12 +400,32 @@ enum ItemRepository {
         .fetchOne(db)
       {
         existing.lastUsedAt = item.copiedAt
+        if let path = item.imagePath, isDeadImageRow(existing) {
+          existing.imagePath = path
+          // Identical bytes by definition — same hash — so a `done` row's OCR
+          // text still describes the new file and re-reading it would be work
+          // for an identical answer. `failed`, though, is very often failed
+          // *because* the file was missing when the queue reached it
+          // (`pixelSize` returns nil and FR-4.3 makes that terminal), so the
+          // repair is the one moment that verdict is worth reopening.
+          if existing.ocrStatus == .failed { existing.ocrStatus = .pending }
+          NSLog("ClipFlow: repaired image row \(existing.id.map(String.init) ?? "?") onto \(path)")
+        }
         try existing.update(db)
         return
       }
       try item.insert(db)
     }
     evictBeyondRetentionLimit()
+  }
+
+  /// An image row whose PNG is not on disk. It renders, it can be selected, and
+  /// it does nothing — and because dedupe is global on `content_hash`
+  /// (DECISIONS D-5b), re-copying the very screenshot that would fix it used to
+  /// count as a hit and leave it dead forever.
+  private static func isDeadImageRow(_ item: Item) -> Bool {
+    guard item.kind == .image, let path = item.imagePath else { return false }
+    return !ImageStore.exists(path)
   }
 
   /// FR-2.5. Runs after every insert and once at launch, so lowering
@@ -433,20 +461,31 @@ enum ItemRepository {
     ImageStore.sweepOrphans(referencedBy: imagePaths())
   }
 
-  /// Bumps an existing row by hash, reporting whether it found one.
+  /// Bumps an existing row by hash, reporting whether it found a *usable* one.
   ///
   /// `save` already dedupes, but an image has to be written to disk *before* it
   /// can be described as an Item — so re-copying the same screenshot would write
   /// several megabytes only to discard them. This is the check that runs first.
+  ///
+  /// False for a row whose image file has gone missing, which is what makes such
+  /// a row repairable at all: the caller short-circuits on true, so a hit there
+  /// meant `ImageStore.save` never ran and the only copy that could have restored
+  /// the file was thrown away by the dedupe that the missing file caused. False
+  /// sends the caller on to write the bytes and call `save`, which adopts this
+  /// same row onto the new path — so it does not become a duplicate, and the
+  /// UNIQUE index on `content_hash` is never offered a second row.
   static func bump(contentHash: String, at timestamp: Int64) -> Bool {
-    let changes = Database.write("bump") { db -> Int in
-      try db.execute(
-        sql: "UPDATE items SET last_used_at = ? WHERE content_hash = ?",
-        arguments: [timestamp, contentHash]
-      )
-      return db.changesCount
+    let bumped = Database.write("bump") { db -> Bool in
+      guard var existing = try Item
+        .filter(Column("content_hash") == contentHash)
+        .fetchOne(db)
+      else { return false }
+      guard !isDeadImageRow(existing) else { return false }
+      existing.lastUsedAt = timestamp
+      try existing.update(db)
+      return true
     }
-    return (changes ?? 0) > 0
+    return bumped ?? false
   }
 
   /// Fetches the full payload for one item. The list deliberately never loads
@@ -522,12 +561,19 @@ enum ItemRepository {
   /// (FR-5.2). A pinned row always holds one — see `togglePin`.
   static let pinSlots = 1...9
 
-  /// What `togglePin` did, so the caller can say so. `slotsFull` is the only
-  /// outcome the user cannot see for themselves.
+  /// What `togglePin` did, so the caller can say so. `slotsFull` and `failed`
+  /// are the outcomes the user cannot see for themselves.
+  ///
+  /// `failed` exists because a failed write used to be reported as `slotsFull`,
+  /// which told the user all nine slots were taken when they were not — a
+  /// specific, checkable claim about a state that isn't true, and one that sends
+  /// them to unpin something to make room for a write that would have failed
+  /// anyway (DECISIONS D-14).
   enum PinResult {
     case pinned(slot: Int)
     case unpinned
     case slotsFull
+    case failed
   }
 
   /// FR-5.2's Option+P, both directions.
@@ -559,7 +605,7 @@ enum ItemRepository {
       )
       return .pinned(slot: slot)
     }
-    return result ?? .slotsFull
+    return result ?? .failed
   }
 
   /// Resolves one of FR-5.2's `Option+1..9` to the row it pastes. Nil when the
@@ -637,11 +683,19 @@ enum ItemRepository {
   /// `History.shared.items`, which is capped at 500 rows and holds search
   /// results whenever the panel was last used to search — either would make the
   /// alert understate what is about to go.
-  static func counts() -> (total: Int, pinned: Int) {
-    let row = Database.read("counts") { db in
+  ///
+  /// **Nil means the count is unknown, and it is not the same as zero.** A
+  /// failed read used to come back as `(0, 0)`, so the alert offered to clear
+  /// "0 items", the user confirmed that, and `deleteUnpinned()` then ran against
+  /// everything there actually was. A destructive action confirmed against a
+  /// number the user was shown and that was wrong is the one outcome a
+  /// confirmation exists to prevent, so the failure has to be visible to the
+  /// caller. Callers must bail out of the confirmation on nil rather than
+  /// substitute a number.
+  static func counts() -> (total: Int, pinned: Int)? {
+    guard let row = Database.read("counts", { db in
       try Row.fetchOne(db, sql: "SELECT COUNT(*) AS total, COALESCE(SUM(pinned), 0) AS pinned FROM items")
-    }
-    guard let row = row ?? nil else { return (0, 0) }
+    }) ?? nil else { return nil }
     return (row["total"], row["pinned"])
   }
 }

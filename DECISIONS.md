@@ -1006,6 +1006,100 @@ what failed; `markUsed` stays deliberately best-effort.
 
 ---
 
+## D-26: Failures the user would otherwise mistake for success
+
+D-25 made the storage layer *report* its failures. This is the other half — the
+places where swallowing one left the user believing something happened that did
+not. The test each of these had to pass: is the failure invisible, and does the
+user act on the belief that it worked?
+
+**`counts()` returning `(0, 0)` on a failed read was the worst of them.** The
+Clear History dialog read that count, told the user "0 items … will be permanently
+deleted. Nothing is pinned.", and then `deleteUnpinned()` ran against everything
+there actually was. A destructive action confirmed against a number the user was
+shown and that was never true is precisely the outcome a confirmation exists to
+prevent. `counts()` now returns nil for unknown, and the dialog does not open —
+there is no honest sentence to put in it.
+
+**`togglePin` reported a failed write as `.slotsFull`**, telling the user all nine
+slots were taken when the change simply had not been saved. Now a distinct
+`.failed`, said differently. A `switch` rather than the old `guard case`, because
+falling through to silence leaves the same "broken shortcut" impression the notice
+was added to prevent (D-14).
+
+**A failed delete said nothing at all.** The list is a live observation, so the row
+just stays put, which reads as the key not working — and deleting is how you get
+rid of something you did not want kept, so believing it worked when it did not is
+the failure that actually costs something. `pinNotice` became `notice`, since it
+now carries more than pins.
+
+Alerts only where the user would otherwise be misled — a destructive action they
+confirmed, or a count they were shown. Everything else logs. An app that opens a
+dialog whenever anything goes wrong gets its permissions revoked out of annoyance,
+which is the same reasoning FR-5.4's one-time explanation already follows.
+
+**A dedupe hit on an image row whose file is gone is not a hit.** `bump` matched on
+`content_hash` alone, so re-copying the identical screenshot to repair a row whose
+PNG had vanished bumped the dead row and wrote nothing. The obvious fix — return
+false — is worse than it looks: `save()` re-dedupes on the same hash, finds the
+dead row again, and leaves the freshly written PNG orphaned, leaking a file per
+re-copy rather than creating a duplicate. So the row is repaired in place instead:
+same id, same pin slot, same first-seen `copied_at`, new `image_path`, and
+`ocr_status` reopened only when it was `failed` — the missing file is usually why
+it failed. Replacing the row would have cost the pin slot, the original timestamp,
+and the id the panel may currently have selected.
+
+**The OCR helper is killed on quit.** It is a `Process` child and those outlive
+their parent (D-18), while the 30 s watchdog is a `DispatchWorkItem` living in the
+app — so it died with the app and left a *wedged* helper running with no watchdog
+at all, holding an open descriptor on a clipboard image indefinitely. An
+`applicationWillTerminate` hook now signals it. A helper killed mid-recognition
+throws a distinct `.cancelled` and leaves its row `pending` rather than spending
+FR-4.3's single permanent attempt on a helper we killed ourselves. The OCR drain
+also moved from a detached `Task` to a dedicated serial `DispatchQueue`: it blocks
+on a pipe read for up to 30 s, which the cooperative pool forbids.
+
+Verified by a control: with the hook, `pgrep` finds no helper after quit; with
+`kill -9` so the hook cannot fire, the helper survives as an orphan. Without that
+second run the first proves nothing.
+
+---
+
+## D-27: Capture costs 37–53 ms on the main actor, measured, and stays there
+
+An audit flagged the whole capture path running on the main actor — a TIFF→PNG
+transcode, SHA-256 over up to 32 MB, a disk write plus a re-read for the thumbnail,
+the insert with its FTS trigger, and retention eviction, all on one copy. D-21's
+budget table measures launch, search and hotkey latency and has no row for capture,
+so the cost had never been taken.
+
+Measured on the release-configured build, `CLIPFLOW_TIMING=1`, three *distinct*
+incompressible 11 MB PNGs against a scratch data directory:
+
+| Copy | Capture |
+| --- | --- |
+| 11 MB image | 53.1 ms |
+| 11 MB image | 37.4 ms |
+| 11 MB image | 40.7 ms |
+| plain text | 8.0 ms |
+
+Method matters here, because the first attempt at this measurement was wrong in
+two ways worth recording. A gradient-filled PNG compressed to 76 KB — nothing like
+a screenshot — and re-copying the *same* image made runs two and three dedupe hits
+that never did the work at all, reporting 3.4 ms and looking like good news. Only
+distinct incompressible images exercise the path.
+
+**Not refactoring on this.** 40 ms of main-thread block is under the threshold
+where a menu-bar app reads as stalled, and extrapolating linearly the 32 MB cap
+lands near 150 ms — noticeable, but only on the largest screenshot the app will
+accept. Moving image work off the main actor means fighting the Sendable-hostile
+Vision and CGImage types that S-18 deliberately chose Swift 5 language mode to
+avoid. That is a real regression risk against a cost the measurement says is
+modest. The timing line stays in the binary, so the number can be re-taken rather
+than re-argued.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a
