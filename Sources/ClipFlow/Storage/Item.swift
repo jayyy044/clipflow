@@ -29,8 +29,8 @@ struct Item: Codable, Identifiable, Hashable, FetchableRecord, MutablePersistabl
   var content: String?
   var preview: String
   /// FR-1.2's rich representation, kept alongside the plain string rather than
-  /// instead of it — which is what makes FR-5.2's Option+Shift+Enter differ from
-  /// Enter. Nil whenever the source app offered no RTF, which is most copies.
+  /// instead of it — which is what makes FR-5.2's Shift+Enter differ from Enter.
+  /// Nil whenever the source app offered no RTF, which is most copies.
   var rtfData: Data?
   /// Relative to `Database.directory`. Nil for text rows.
   var imagePath: String?

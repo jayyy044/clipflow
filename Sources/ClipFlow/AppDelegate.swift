@@ -162,9 +162,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   /// FR-5.2's `Option+N`: paste the item in that pin slot without the panel ever
-  /// appearing. Same `Clipboard.copy` + `Paster.paste` pair the panel's
-  /// Option+Enter uses — there is one paste path, and HP-2's timing and FR-5.4's
-  /// copy-only fallback both live in it.
+  /// appearing. Same `Clipboard.copy` + `Paster.paste` pair the panel's Return
+  /// uses — there is one paste path, and HP-2's timing and FR-5.4's copy-only
+  /// fallback both live in it.
   ///
   /// An empty slot does nothing. Pasting the wrong item into a document because
   /// slot 4 happens to be free is worse than a shortcut that appears inert.

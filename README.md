@@ -47,10 +47,9 @@ from the app you were in, which is what makes pasting back into it work.
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Copy and close. With nothing selected, takes the top result. |
+| `Enter` | Paste into the app you were in. With nothing selected, takes the top result. |
 | Click a row | Same as Enter |
-| `Option+Enter` | Paste into the app you were in |
-| `Option+Shift+Enter` | Paste as plain text, stripping formatting |
+| `Shift+Enter` | Paste as plain text, stripping formatting |
 | `Option+P` | Pin or unpin, assigning a stable slot |
 | `Ctrl+Cmd+1…9` | Paste a pinned item without opening the panel |
 | `Cmd+O` | Open the first detected URL in the default browser |
@@ -59,7 +58,9 @@ from the app you were in, which is what makes pasting back into it work.
 | `Esc` | Close |
 
 Right-clicking a row offers the same actions as a menu, which is the discoverable
-route. Right-clicking the menu bar icon gives Pause Capture, Ignore Next Copy,
+route. It also has **Copy**, which puts the item on the clipboard without pasting
+it — there is no key for that, because the cases where pasting can't happen
+already fall back to copying on their own. Right-clicking the menu bar icon gives Pause Capture, Ignore Next Copy,
 Unpin All, Clear History, and Settings.
 
 Pinned items sit in their own section above the history and are never evicted by

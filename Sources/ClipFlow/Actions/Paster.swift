@@ -143,7 +143,7 @@ enum Paster {
       allows with Accessibility permission.
 
       Grant it in System Settings > Privacy & Security > Accessibility. Until \
-      then Option+Enter copies, and you can paste yourself.
+      then picking an item copies it, and you can paste yourself.
       """
     alert.addButton(withTitle: "Open System Settings")
     alert.addButton(withTitle: "Not Now")
@@ -165,8 +165,11 @@ enum Paster {
     NSWorkspace.shared.open(url)
   }
 
-  /// Not persisted like the permission alert: secure input is transient and only
-  /// ever surfaces on an explicit Option+Enter, so it can't nag on its own.
+  /// Not persisted like the permission alert, because secure input is transient —
+  /// it goes away when the password field loses focus. Since D-22 made pasting the
+  /// default action this can fire on a plain Return, where before it needed a
+  /// deliberate modified one; that is the case where the explanation is most
+  /// useful, so it stays un-suppressed until it actually proves annoying.
   private static func explainSecureInput() {
     NSLog("ClipFlow: secure input is enabled; copied instead of pasting")
 

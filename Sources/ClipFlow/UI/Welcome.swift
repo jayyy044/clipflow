@@ -85,7 +85,7 @@ struct WelcomeView: View {
         trusted ? "checkmark.circle" : "hand.raised",
         trusted ? "Pasting is enabled" : "Pasting needs one permission",
         trusted
-          ? "Option+Enter pastes straight into the app you were in."
+          ? "Enter or a click pastes straight into the app you were in."
           : "Without it ClipFlow copies and you press Cmd+V yourself. Everything else works either way."
       )
 

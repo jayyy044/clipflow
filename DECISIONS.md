@@ -843,6 +843,65 @@ measured rather than intentions that get asserted.
 
 ---
 
+## D-22: Enter and click paste, and there is no copy-without-paste key at all
+
+FR-5.2 as written put copy on the unmodified Return and click, and paste behind
+`Option+Enter`. That is now inverted, and the copy-only chord is gone entirely:
+
+| Key | Before | After |
+| --- | --- | --- |
+| `Enter` / click | Copy and close | **Paste** |
+| `Shift+Enter` | — | **Paste as plain text** |
+| `Option+Enter` | Paste | pastes, like any other Return |
+| `Option+Shift+Enter` | Paste as plain text | retired, folded into `Shift+Enter` |
+
+**Why paste became the default.** The user expected clicking a row to paste, and
+said so unprompted twice. Two independent surprises at the same spot is a spec
+problem, not a user problem. The reasoning holds on its own: you open the panel to
+*use* an item, so pasting is the common case and copy-without-paste is the rare
+one. Putting a modifier on the common case is friction on exactly the path G2's
+three-second budget covers, and it is what Maccy does — which is where the
+instinct came from.
+
+**Why no copy-only key survives.** The first cut of this decision moved copy-only
+onto `Option+Enter`. It did not survive the obvious question — what is it *for*?
+Every case where pasting cannot happen already falls back to copy without being
+asked, because `HistoryView.paste` calls `Clipboard.copy` before `Paster.paste`
+checks `AXIsProcessTrusted` or `IsSecureEventInputEnabled`. No grant, or secure
+input held: the item is on the clipboard and the user is told why. That covers the
+failure modes. What a deliberate chord adds is only "put it somewhere I am not
+right now" — real, but rare, and already served by the context menu's **Copy**,
+which is where a mouse user would look. A third thing Return can do is a worse
+price than a right-click on the rare path.
+
+Noted for the record: `Cmd+Enter` was considered and rejected before the binding
+was dropped altogether. A Command chord is a *key equivalent* — offered to the
+responder chain and the menu system, never arriving at SwiftUI's `onKeyPress`,
+the trap already documented for `Cmd+O`. It would have needed its own case in
+`Panel.performKeyEquivalent` plus a notification hop. If copy-only ever earns a
+key again, that plumbing is the cost.
+
+**The permission fallback needed no code.** FR-5.4 already treats copy-only as a
+legitimate outcome, and the ordering in `HistoryView.paste` already delivers it:
+`Clipboard.copy` writes the pasteboard *before* `Paster.paste` checks
+`AXIsProcessTrusted`. Without the grant the item is on the clipboard and the user
+gets the one-time explanation — the same behaviour as before, now reached by the
+default key rather than a modified one.
+
+**One honest regression.** `explainSecureInput` is deliberately not persisted, on
+the old reasoning that secure input "only ever surfaces on an explicit
+Option+Enter, so it can't nag". That is no longer true: with a password field
+focused, a plain Return now raises it. Kept anyway, un-suppressed — a user pasting
+into a password field is precisely who needs to be told the keystroke was
+discarded. Revisit if it proves annoying in practice rather than in theory.
+
+**Still unverified.** `Shift+Enter` differing from `Enter` depends on the RTF
+paste path, which no human has exercised end to end. See the RTF paste thread —
+capture is proven (441 bytes stored from a real RTF write), the two *modes* are
+not.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a

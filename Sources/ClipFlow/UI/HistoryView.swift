@@ -125,7 +125,7 @@ struct HistoryView: View {
       return .handled
     }
     // `keys:` rather than the single-key overload, because that one hands back no
-    // modifiers and FR-5.2 puts three different actions on Return.
+    // modifiers and Shift+Return has to be distinguishable from a bare one.
     .onKeyPress(keys: [.return]) { press in
       guard let selection else { return .ignored }
       perform(selection, modifiers: press.modifiers)
@@ -181,11 +181,12 @@ struct HistoryView: View {
         // you would have to arrow into the list first.
         //
         // onSubmit alone is not enough: it fires only for an *unmodified*
-        // Return. The field eats Option+Return and reports nothing, so
-        // Option+Enter did nothing at all until this handler existed —
-        // measured, not guessed. onKeyPress on the focused field sees the event
-        // before the field's own handling, which is the only place a modified
-        // Return is still interceptable.
+        // Return. The field eats a modified one and reports nothing, so the
+        // modified chord did nothing at all until this handler existed —
+        // measured, not guessed, back when it was Option+Enter. It now carries
+        // Shift+Enter, and the trap is the same. onKeyPress on the focused field
+        // sees the event before the field's own handling, which is the only
+        // place a modified Return is still interceptable.
         .onKeyPress(keys: [.return], phases: .down) { press in
           guard !press.modifiers.isEmpty else { return .ignored }  // plain Return stays with onSubmit
           guard let target = selection ?? history.items.first?.id else { return .ignored }
@@ -283,15 +284,16 @@ struct HistoryView: View {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { onClose() }
   }
 
-  /// FR-5.2's action table for Return. Option decides copy versus paste and
-  /// Shift decides plain text, read off the key press for the same reason
-  /// Option+Delete is bound that way: focus lives in the search field, so an
-  /// unmodified Return has to stay available for the fast path.
+  /// FR-5.2's action table for Return, inverted by DECISIONS D-22: every Return
+  /// pastes, and Shift decides plain text. You opened the panel to *use* an item,
+  /// so the common case is the one that should carry no modifier.
+  ///
+  /// There is deliberately no copy-without-paste chord. The cases where pasting
+  /// cannot happen — no Accessibility grant, secure input held — already fall back
+  /// to copy on their own, because `Clipboard.copy` writes the pasteboard before
+  /// `Paster.paste` checks either. What is left is "put it on the clipboard for
+  /// somewhere else", which is rare enough to live in the context menu.
   private func perform(_ itemID: Int64, modifiers: EventModifiers) {
-    guard modifiers.contains(.option) else {
-      copy(itemID)
-      return
-    }
     paste(itemID, plainText: modifiers.contains(.shift))
   }
 
@@ -384,7 +386,10 @@ struct HistoryView: View {
       // of the panel being open, so there is nothing else a click would mean.
       // contentShape makes the blank space in the row clickable too.
       .contentShape(.rect)
-      .onTapGesture { copy(item.id) }
+      // Pastes rather than copies, matching plain Return (DECISIONS D-22). Copy
+      // without pasting stays reachable from the context menu, which is where a
+      // mouse user would look for it anyway.
+      .onTapGesture { paste(item.id, plainText: false) }
       // Discoverable counterpart to Option+Delete, and the only route for
       // anyone using the mouse.
       .contextMenu {

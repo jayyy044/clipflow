@@ -2,10 +2,11 @@ import AppKit
 
 enum Clipboard {
   /// Puts an item back on the system clipboard. `Paster.paste()` is what then
-  /// makes another app take it; on its own this is FR-5.2's Enter action, and
-  /// FR-5.4's copy-only fallback when pasting isn't permitted.
+  /// makes another app take it; on its own this is the context menu's Copy — the
+  /// only deliberate copy-without-paste left after DECISIONS D-22 — and FR-5.4's
+  /// copy-only fallback when pasting isn't permitted.
   ///
-  /// `plainText` is FR-5.2's Option+Shift+Enter: it writes the string alone, so
+  /// `plainText` is FR-5.2's Shift+Enter: it writes the string alone, so
   /// the receiving app has no rich representation to take. A normal copy writes
   /// both, so formatting survives a round trip through the history. For an item
   /// captured without RTF — most of them — the two are identical, and for image
