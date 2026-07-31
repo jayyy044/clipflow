@@ -864,15 +864,16 @@ three-second budget covers, and it is what Maccy does — which is where the
 instinct came from.
 
 **Why no copy-only key survives.** The first cut of this decision moved copy-only
-onto `Option+Enter`. It did not survive the obvious question — what is it *for*?
+onto `Option+Enter`, and later the context-menu **Copy** button went the same
+way. Neither survived the obvious question — what is it *for*?
 Every case where pasting cannot happen already falls back to copy without being
 asked, because `HistoryView.paste` calls `Clipboard.copy` before `Paster.paste`
 checks `AXIsProcessTrusted` or `IsSecureEventInputEnabled`. No grant, or secure
 input held: the item is on the clipboard and the user is told why. That covers the
 failure modes. What a deliberate chord adds is only "put it somewhere I am not
-right now" — real, but rare, and already served by the context menu's **Copy**,
-which is where a mouse user would look. A third thing Return can do is a worse
-price than a right-click on the rare path.
+right now" — and the clipboard already does that. Cmd+C in any app is captured,
+so a second, worse way of putting something on the clipboard, offered from inside
+the tool whose whole job is remembering what you copied, was never needed.
 
 Noted for the record: `Cmd+Enter` was considered and rejected before the binding
 was dropped altogether. A Command chord is a *key equivalent* — offered to the
