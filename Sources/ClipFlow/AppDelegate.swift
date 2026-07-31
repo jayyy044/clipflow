@@ -94,6 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // and a history with no link glyphs anywhere looks like the feature is off.
     URLDetector.backfill()
     registerLaunchAtLoginOnce()
+    // After the status item exists, so the window the user dismisses leaves a
+    // visible app behind rather than nothing at all.
+    WelcomeWindow.showIfFirstLaunch()
     // FR-5.4: paste degrading to copy is a silent difference, and the grant can
     // vanish on its own (a rebuild with a different signature, a macOS update).
     // One line at launch makes "why did it stop pasting" answerable from the log.

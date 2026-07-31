@@ -405,16 +405,35 @@ struct HistoryView: View {
   }
 
   private var empty: some View {
+    // An empty history and a search that found nothing are different problems,
+    // and telling someone who has copied all day that they have nothing reads as
+    // the app having lost their data.
     VStack(spacing: 6) {
       Image(systemName: query.isEmpty ? "clipboard" : "magnifyingglass")
         .font(.system(size: 26))
         .foregroundStyle(.tertiary)
-      // An empty history and a search that found nothing are different problems,
-      // and saying "Nothing copied yet" to someone who has copied all day reads
-      // as the app having lost their data.
-      Text(query.isEmpty ? "Nothing copied yet" : "No matches")
-        .foregroundStyle(.secondary)
+
+      if query.isEmpty {
+        Text("Nothing copied yet")
+          .foregroundStyle(.secondary)
+        // The first thing a new install shows. Saying only "nothing yet" leaves
+        // someone who just granted permissions with no idea whether it is
+        // working or broken.
+        Text("Copy something and it will appear here")
+          .font(.caption)
+          .foregroundStyle(.tertiary)
+      } else {
+        Text("No matches for “\(query)”")
+          .foregroundStyle(.secondary)
+        // Naming the term matters when the query is a typo or a stale
+        // half-word left over from the last open.
+        Text("Searches text you copied and text inside screenshots")
+          .font(.caption)
+          .foregroundStyle(.tertiary)
+          .multilineTextAlignment(.center)
+      }
     }
+    .padding(.horizontal, 24)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 }
