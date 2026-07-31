@@ -57,9 +57,9 @@ from the app you were in, which is what makes pasting back into it work.
 | `Up` / `Down` | Move through the list |
 | `Esc` | Close |
 
-Right-clicking a row offers the same actions as a menu, plus **Copy** for putting
-an item on the clipboard without pasting it. Right-clicking the menu bar icon
-gives Pause Capture, Ignore Next Copy, Unpin All, Clear History, and Settings.
+Right-clicking a row offers the same actions as a menu. Right-clicking the menu
+bar icon gives Pause Capture, Ignore Next Copy, Unpin All, Clear History, and
+Settings.
 
 Pinned items sit in their own section above the history and are never evicted by
 retention. Their slot numbers are stable, so `Ctrl+Cmd+3` always pastes the same

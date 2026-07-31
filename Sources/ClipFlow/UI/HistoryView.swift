@@ -315,15 +315,6 @@ struct HistoryView: View {
     noticeToken += 1
   }
 
-  private func copy(_ itemID: Int64) {
-    // Highlight first, close second. The clipboard write happens immediately —
-    // only the dismissal waits, long enough for the blue to register as
-    // confirmation of what was picked. Short enough not to feel like lag.
-    selection = itemID
-    Clipboard.copy(itemID: itemID)
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { onClose() }
-  }
-
   /// FR-5.2's action table for Return, inverted by DECISIONS D-22: every Return
   /// pastes, and Shift decides plain text. You opened the panel to *use* an item,
   /// so the common case is the one that should carry no modifier.
@@ -458,7 +449,6 @@ struct HistoryView: View {
       // Discoverable counterpart to Option+Delete, and the only route for
       // anyone using the mouse.
       .contextMenu {
-        Button("Copy") { copy(item.id) }
         Button("Paste") { paste(item.id, plainText: false) }
         Button("Paste as Plain Text") { paste(item.id, plainText: true) }
         // Absent, not disabled, on rows without a link: the glyph already says
