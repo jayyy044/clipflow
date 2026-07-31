@@ -57,6 +57,13 @@ final class PasteboardMonitor {
   /// silently un-pause the user.
   private var suspendedBy: Set<String> = []
 
+  /// Distinct apps that have held the front since the previous tick, oldest
+  /// first. Written by activation notifications as they arrive, drained by
+  /// `closeFrontmostWindow()`. Bounded by being deduplicated on insert: it holds
+  /// at most one entry per app the user switched through in half a second.
+  private var recentFrontmost: [NSRunningApplication] = []
+  private var activationObserver: NSObjectProtocol?
+
   /// Set by our own writes to the pasteboard. Without it, every paste bumps
   /// `changeCount`, gets re-captured, and reshuffles the history
   /// (DECISIONS S-1). Phase 4 will call `ignoreNextChange()` from the paster.
@@ -79,6 +86,56 @@ final class PasteboardMonitor {
   private init() {
     lastChangeCount = pasteboard.changeCount
     observeSleepAndLock()
+    observeActivations()
+  }
+
+  deinit {
+    if let activationObserver {
+      NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+    }
+  }
+
+  /// FR-7.2 cannot be answered by one sample taken at capture time. `changeCount`
+  /// only says a copy happened *somewhere* between the previous poll and this one
+  /// — 500 ms of interval plus 200 ms of timer tolerance plus `settleDelay` — and
+  /// macOS cannot be asked who was frontmost at a past instant, which is the same
+  /// reason this class polls at all (PRD HP-1). Sampling `frontmostApplication`
+  /// inside `capture()` therefore reads whoever the user Cmd+Tabbed *into* after
+  /// copying, and that is the ordinary gesture after copying a password: the
+  /// exclusion check is run against the target app, passes, and the password is
+  /// written to SQLite and the FTS index in plaintext under the wrong
+  /// `source_bundle_id`.
+  ///
+  /// So the frontmost app is recorded as it changes instead of reconstructed
+  /// afterwards, and the exclusion decision is made against every app that held
+  /// the front while the copy could have happened.
+  private func observeActivations() {
+    activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+    ) { [weak self] note in
+      guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+      else { return }
+      self?.noteFrontmost(app)
+    }
+  }
+
+  private func noteFrontmost(_ app: NSRunningApplication) {
+    guard !recentFrontmost.contains(where: { $0.bundleIdentifier == app.bundleIdentifier })
+    else { return }
+    recentFrontmost.append(app)
+  }
+
+  /// Closes the window the current tick covers and opens the next one. Returns
+  /// every app that could have been frontmost when the copy landed: whoever held
+  /// the front when the previous tick ran, everything that activated since, and
+  /// whoever holds it now. Called on every tick, including the ones that see no
+  /// change, because a copy the *next* tick reports happened after this one.
+  private func closeFrontmostWindow() -> [NSRunningApplication] {
+    let current = NSWorkspace.shared.frontmostApplication
+    if let current { noteFrontmost(current) }
+    let window = recentFrontmost
+    recentFrontmost = current.map { [$0] } ?? []
+    return window
   }
 
   /// Nothing can reach the pasteboard while the display is off, the machine is
@@ -142,6 +199,13 @@ final class PasteboardMonitor {
 
   func start() {
     guard timer == nil else { return }
+    // Frontmost history from before a suspension describes a machine that was
+    // asleep or locked in between, so it says nothing about who was in front
+    // when a copy the first tick sees was made. Dropping it leaves that first
+    // window starting at whoever is in front now, which is what D-16 already
+    // chose for the change count: capture what is on the pasteboard rather than
+    // lose a copy made between the unlock and the next tick.
+    recentFrontmost = []
     let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
       self?.tick()
     }
@@ -188,6 +252,11 @@ final class PasteboardMonitor {
   }
 
   private func tick() {
+    // Before any early return: the window has to be closed on every tick, or the
+    // one that finally sees a change would decide against a window stretching
+    // back to the last copy instead of back to the last poll.
+    let frontmostWindow = closeFrontmostWindow()
+
     let current = pasteboard.changeCount
     guard current != lastChangeCount else { return }
     lastChangeCount = current
@@ -214,25 +283,60 @@ final class PasteboardMonitor {
       try? await Task.sleep(for: Self.settleDelay)
       // Another copy landed while we waited; the next tick will handle it.
       guard self.pasteboard.changeCount == current else { return }
-      self.capture()
+      // The window is the one the tick closed, not one sampled after the settle
+      // delay — the copy happened before the tick, so anything that activated
+      // during those 80 ms belongs to the next window, not this one.
+      self.capture(frontmostWindow: frontmostWindow)
     }
   }
 
   @MainActor
-  private func capture() {
+  private func capture(frontmostWindow: [NSRunningApplication]) {
     let types = Set(pasteboard.types ?? [])
     guard types.isDisjoint(with: Self.skipTypes) else { return }
 
-    let app = NSWorkspace.shared.frontmostApplication
-
-    // FR-7.2. Checked against the app that is frontmost at capture time — the
-    // same one recorded as `source_bundle_id` — so exclusion means exactly what
-    // the list in Settings shows. Before anything is hashed or written: an
-    // excluded app's contents must not reach disk even long enough to be swept.
-    if let bundleID = app?.bundleIdentifier, Preferences.excludedBundleIDs.contains(bundleID) {
-      NSLog("ClipFlow: skipped copy from excluded app \(bundleID)")
+    // FR-7.2, failing closed: one excluded app anywhere in the window this copy
+    // could have fallen in is enough to drop it. Checked before anything is
+    // hashed or written — an excluded app's contents must not reach disk even
+    // long enough to be swept.
+    //
+    // What this actually guarantees, stated honestly: nothing is stored if an
+    // excluded app was frontmost at any point between the previous poll and this
+    // one. It is *not* "the app the copy came from is not excluded" — which app
+    // that was is unknowable (PRD HP-1) — so it is both wider and narrower than
+    // the list in Settings reads. Wider: copying in a normal app and switching
+    // into an excluded one within the same window drops the item too. Narrower,
+    // and these are the holes left: an activation delivered to the main queue
+    // after the tick that should have seen it lands in the following window, and
+    // the first window after a resume begins at the sleep gap rather than at a
+    // poll. Both are one-sided in the safe direction only by luck, not by
+    // construction. Losing an item costs the user a second Cmd+C; a password in
+    // a searchable plaintext database cannot be taken back, which is why the
+    // trade runs this way.
+    let excluded = Preferences.excludedBundleIDs
+    if let hit = frontmostWindow.compactMap(\.bundleIdentifier).first(where: excluded.contains) {
+      NSLog("ClipFlow: skipped copy, excluded app \(hit) was frontmost during the copy window")
       return
     }
+
+    // `source_bundle_id` is recorded from the same window the exclusion decision
+    // was made against, so the two can never disagree. When the front moved during
+    // the window the source is strictly unknowable (PRD HP-1), and the honest
+    // answer would be nil — but the window is ordered oldest first and seeded with
+    // whoever held the front at the previous tick, which makes the first entry the
+    // best available guess rather than an arbitrary one.
+    //
+    // Taking the guess, because the ambiguous case is not symmetric. A window only
+    // holds two apps when the user copied *and* switched inside the same ~500 ms,
+    // and the overwhelmingly common reason to do that is copying in order to paste
+    // somewhere else — copy, then Cmd+Tab. Switching first and then copying that
+    // fast is rarer, because selecting something to copy takes longer than that.
+    // So the first entry is right far more often than it is wrong.
+    //
+    // Cheap either way: this is display and search only. The exclusion decision
+    // above is made against every app in the window independently, so a wrong
+    // guess here costs a wrong icon in the list, never a stored secret.
+    let app = frontmostWindow.first
 
     let now = Int64(Date().timeIntervalSince1970 * 1000)
 

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import GRDB
 
@@ -39,27 +40,161 @@ enum Database {
   /// which refuses to insert anything anywhere else (DECISIONS D-15).
   static var isScratchDirectory: Bool { isScratch(directory) }
 
+  /// Opening the database used to `fatalError`, which in a menu-bar app with no
+  /// Dock icon reads as "the icon stopped appearing" and repeats on every launch:
+  /// a corrupt WAL, a disk full during a migration, or a bug in a future
+  /// migration bricked the app permanently with nothing on screen saying why.
+  ///
+  /// So instead: open, and if that fails move the existing files aside to
+  /// `clipflow.sqlite.corrupt-<stamp>` and open a fresh one. Nothing is deleted
+  /// or overwritten — the quarantined set is a complete database the user can
+  /// move back — because a clipboard history is not reconstructible and neither
+  /// are the images `images.noindex` still holds for it (DECISIONS D-15). The
+  /// alert names both paths for that reason: it is the only instruction the user
+  /// gets for recovering the old file, and the sweep will not touch those images
+  /// while their rows are missing, since it only ever runs after a write.
+  ///
+  /// If the fresh open fails too — the disk-full case, where the rename can
+  /// succeed and the create still cannot — the app runs on an in-memory queue.
+  /// Capture works for this session and nothing persists, which is worse than
+  /// working and better than an app that will not start.
   static let shared: DatabaseQueue = {
     let dir = directory
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let path = dir.appending(path: "clipflow.sqlite").path
 
-    do {
-      // GRDB only enables WAL automatically for DatabasePool, not DatabaseQueue,
-      // so this has to be explicit. Fewer fsyncs per write and no rewrite-the-
-      // whole-journal stall, which matters because we write on every copy.
-      var config = Configuration()
-      config.journalMode = .wal
+    let failure: Error
+    do { return try openMigrated(at: path) } catch { failure = error }
+    NSLog("ClipFlow: could not open \(path): \(failure)")
 
-      let queue = try DatabaseQueue(
-        path: dir.appending(path: "clipflow.sqlite").path,
-        configuration: config
-      )
-      try migrator.migrate(queue)
+    // Only genuine corruption earns a quarantine. Every other reason an open can
+    // fail is about the machine rather than the file — a full disk, a volume that
+    // went away, another process holding a lock, or a bug in a migration running
+    // against a perfectly good database. Renaming the history aside in those cases
+    // would be the worst outcome available: the fault clears on its own, and the
+    // user reopens to an empty ClipFlow with their real history sitting under a
+    // name they have to read an alert to discover. Degraded-but-intact is the
+    // better failure, so anything unrecognised falls through to the in-memory
+    // branch below and leaves the file exactly where it is.
+    if indicatesCorruption(failure), let quarantined = quarantine(path),
+       let queue = try? openMigrated(at: path) {
+      report("""
+        The existing database could not be opened, so it was moved aside and a new, \
+        empty one was created. Your old history has not been deleted:
+
+        \(quarantined)
+
+        Images for it are still in \(ImageStore.directory.path). Quit ClipFlow before \
+        moving either file back.
+        """)
       return queue
-    } catch {
-      fatalError("Cannot open database: \(error)")
     }
+
+    report("""
+      No database could be opened or created at \(path). \
+      Nothing copied during this session will be saved, and your existing history \
+      has been left untouched. Check that the disk is not full, then quit and \
+      reopen ClipFlow.
+      """)
+    // Only fails if SQLite cannot allocate at all, at which point there is no
+    // degraded mode left to fall back to.
+    let memory = try! DatabaseQueue()
+    try? migrator.migrate(memory)
+    return memory
   }()
+
+  /// Whether SQLite is telling us the *file* is bad, as opposed to the conditions
+  /// around it. `SQLITE_CORRUPT` is a malformed image and `SQLITE_NOTADB` is a
+  /// file that is not a database at all — both mean reopening will fail forever,
+  /// which is what makes moving it aside worth doing. `SQLITE_BUSY`,
+  /// `SQLITE_CANTOPEN`, `SQLITE_IOERR` and `SQLITE_FULL` all describe a machine
+  /// having a bad moment, and every one of them can clear by itself.
+  ///
+  /// Deliberately a allowlist rather than a denylist: an unrecognised error means
+  /// we do not know what is wrong, and "do not touch the user's only copy" is the
+  /// right default for not knowing.
+  private static func indicatesCorruption(_ error: Error) -> Bool {
+    guard let dbError = error as? DatabaseError else { return false }
+    let code = dbError.resultCode.primaryResultCode
+    return code == .SQLITE_CORRUPT || code == .SQLITE_NOTADB
+  }
+
+  private static func openMigrated(at path: String) throws -> DatabaseQueue {
+    // GRDB only enables WAL automatically for DatabasePool, not DatabaseQueue,
+    // so this has to be explicit. Fewer fsyncs per write and no rewrite-the-
+    // whole-journal stall, which matters because we write on every copy.
+    var config = Configuration()
+    config.journalMode = .wal
+
+    let queue = try DatabaseQueue(path: path, configuration: config)
+    try migrator.migrate(queue)
+    return queue
+  }
+
+  /// Renames the database out of the way, siblings included: a `-wal` left
+  /// behind would be replayed into the new file, which is how "recover from
+  /// corruption" turns into corrupting the replacement. Returns the new path, or
+  /// nil if there was nothing to move or the move itself failed — in which case
+  /// the caller must not assume a clean slate.
+  private static func quarantine(_ path: String) -> String? {
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: path) else { return nil }
+
+    let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+    let target = "\(path).corrupt-\(stamp)"
+    do {
+      try fm.moveItem(atPath: path, toPath: target)
+    } catch {
+      NSLog("ClipFlow: could not quarantine \(path): \(error)")
+      return nil
+    }
+    for suffix in ["-wal", "-shm"] {
+      try? fm.moveItem(atPath: path + suffix, toPath: target + suffix)
+    }
+    NSLog("ClipFlow: quarantined unreadable database to \(target)")
+    return target
+  }
+
+  /// Async on the main queue because this runs inside a lazy global initializer
+  /// that any thread may be the first to touch, and NSAlert is main-thread only.
+  /// Deferring also keeps the modal out of the middle of `applicationDidFinishLaunching`.
+  private static func report(_ detail: String) {
+    NSLog("ClipFlow: \(detail)")
+    DispatchQueue.main.async {
+      let alert = NSAlert()
+      alert.alertStyle = .critical
+      alert.messageText = "ClipFlow could not open its clipboard history"
+      alert.informativeText = detail
+      NSApp.activate(ignoringOtherApps: true)
+      alert.runModal()
+    }
+  }
+
+  /// One place for every write, because the alternative — `try?` at each call
+  /// site — is what made a failed write indistinguishable from a successful one.
+  /// The result is optional so callers that care can tell; the NSLog is so the
+  /// ones that don't still leave a trace.
+  @discardableResult
+  static func write<T>(_ label: String, _ body: (GRDB.Database) throws -> T) -> T? {
+    do {
+      return try shared.write(body)
+    } catch {
+      NSLog("ClipFlow: \(label) failed: \(error)")
+      return nil
+    }
+  }
+
+  /// Same for reads. A failed read is usually recoverable by retrying later, but
+  /// silently reading zero rows is how a count in a confirmation alert ends up
+  /// lying about what is on disk.
+  static func read<T>(_ label: String, _ body: (GRDB.Database) throws -> T) -> T? {
+    do {
+      return try shared.read(body)
+    } catch {
+      NSLog("ClipFlow: \(label) failed: \(error)")
+      return nil
+    }
+  }
 
   static var migrator: DatabaseMigrator {
     var migrator = DatabaseMigrator()
@@ -251,7 +386,7 @@ enum ItemRepository {
   /// floats it back to the top, since ordering is max(copied_at, last_used_at).
   static func save(_ item: Item) {
     var item = item
-    try? Database.shared.write { db in
+    Database.write("save") { db in
       if var existing = try Item
         .filter(Column("content_hash") == item.contentHash)
         .fetchOne(db)
@@ -280,7 +415,7 @@ enum ItemRepository {
   /// which some happen to be pinned". Filtering only the DELETE would let nine
   /// pins silently shorten the history by nine.
   static func evictBeyondRetentionLimit() {
-    let evicted = try? Database.shared.write { db -> Int in
+    let evicted = Database.write("eviction") { db -> Int in
       try db.execute(sql: """
         DELETE FROM items WHERE id IN (
           SELECT id FROM items
@@ -304,7 +439,7 @@ enum ItemRepository {
   /// can be described as an Item — so re-copying the same screenshot would write
   /// several megabytes only to discard them. This is the check that runs first.
   static func bump(contentHash: String, at timestamp: Int64) -> Bool {
-    let changes = try? Database.shared.write { db -> Int in
+    let changes = Database.write("bump") { db -> Int in
       try db.execute(
         sql: "UPDATE items SET last_used_at = ? WHERE content_hash = ?",
         arguments: [timestamp, contentHash]
@@ -317,23 +452,33 @@ enum ItemRepository {
   /// Fetches the full payload for one item. The list deliberately never loads
   /// `content`, so this is where it gets read — one row, on demand.
   static func item(id: Int64) -> Item? {
-    try? Database.shared.read { db in
+    Database.read("item(id:)") { db in
       try Item.withID(id).fetchOne(db)
-    }
+    } ?? nil
   }
 
   /// Everything the images directory is allowed to keep (DECISIONS S-17).
+  ///
+  /// A failed read used to return the empty set, and the empty set is the exact
+  /// argument that tells `sweepOrphans` every file on disk is an orphan — one
+  /// unreadable page and every image is deleted, which D-15 records as the
+  /// unrecoverable half of this app's data. So on failure it names every file
+  /// that is already there instead: the sweep then matches everything, keeps
+  /// everything, and the next successful sweep collects whatever was really
+  /// orphaned.
   static func imagePaths() -> Set<String> {
-    let paths = try? Database.shared.read { db in
+    let paths = Database.read("imagePaths") { db in
       try String.fetchAll(db, sql: "SELECT image_path FROM items WHERE image_path IS NOT NULL")
     }
-    return Set(paths ?? [])
+    if let paths { return Set(paths) }
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: ImageStore.directory.path)) ?? []
+    return Set(names.map { "\(ImageStore.directory.lastPathComponent)/\($0)" })
   }
 
   /// The next image waiting for OCR, newest first — a fresh screenshot becomes
   /// searchable while a backlog is still draining, rather than after it.
   static func nextPendingOCR() -> (id: Int64, imagePath: String)? {
-    let row = try? Database.shared.read { db in
+    let row = Database.read("nextPendingOCR") { db in
       try Row.fetchOne(db, sql: """
         SELECT id, image_path FROM items
         WHERE ocr_status = 'pending' AND image_path IS NOT NULL
@@ -348,7 +493,7 @@ enum ItemRepository {
   /// the written `ocr_text` into FTS postings, which is the whole feature — no
   /// index maintenance belongs here.
   static func finishOCR(id: Int64, text: String?, status: OCRStatus) {
-    try? Database.shared.write { db in
+    Database.write("finishOCR") { db in
       try db.execute(
         sql: "UPDATE items SET ocr_text = ?, ocr_status = ? WHERE id = ?",
         arguments: [text, status.rawValue, id]
@@ -361,14 +506,14 @@ enum ItemRepository {
   /// Ids only: see `URLDetector.backfill()` for why the content isn't fetched
   /// alongside.
   static func idsMissingURLDetection() -> [Int64] {
-    let ids = try? Database.shared.read { db in
+    let ids = Database.read("idsMissingURLDetection") { db in
       try Int64.fetchAll(db, sql: "SELECT id FROM items WHERE kind = 'text' AND detected_urls IS NULL")
     }
     return ids ?? []
   }
 
   static func setDetectedURLs(id: Int64, json: String) {
-    try? Database.shared.write { db in
+    Database.write("setDetectedURLs") { db in
       try db.execute(sql: "UPDATE items SET detected_urls = ? WHERE id = ?", arguments: [json, id])
     }
   }
@@ -397,7 +542,7 @@ enum ItemRepository {
   /// second hits the UNIQUE index.
   @discardableResult
   static func togglePin(id: Int64) -> PinResult {
-    let result = try? Database.shared.write { db -> PinResult in
+    let result = Database.write("togglePin") { db -> PinResult in
       let isPinned = try Bool.fetchOne(db, sql: "SELECT pinned FROM items WHERE id = ?", arguments: [id])
       guard let isPinned else { return .unpinned }
 
@@ -421,14 +566,16 @@ enum ItemRepository {
   /// slot is empty, which is the common case for most of the nine — the shortcut
   /// then does nothing rather than pasting something arbitrary.
   static func pinnedItemID(slot: Int) -> Int64? {
-    try? Database.shared.read { db in
+    Database.read("pinnedItemID") { db in
       try Int64.fetchOne(db, sql: "SELECT id FROM items WHERE pin_slot = ?", arguments: [slot])
     } ?? nil
   }
 
+  /// A best-effort bump: if it fails the item just does not float to the top,
+  /// which is why nothing is propagated and the log line is the whole response.
   static func markUsed(id: Int64) {
     let now = Int64(Date().timeIntervalSince1970 * 1000)
-    try? Database.shared.write { db in
+    Database.write("markUsed") { db in
       try db.execute(sql: "UPDATE items SET last_used_at = ? WHERE id = ?", arguments: [now, id])
     }
   }
@@ -437,12 +584,20 @@ enum ItemRepository {
   ///
   /// The sweep runs after the row is gone, so it sees the real remaining
   /// references — deleting the file first would strand the row if the write
-  /// failed, and computing the reference set first would race the delete.
-  static func delete(id: Int64) {
-    try? Database.shared.write { db in
+  /// failed, and computing the reference set first would race the delete. It is
+  /// skipped entirely when the delete failed, since nothing became orphaned.
+  ///
+  /// Returns whether the row is actually gone. The user asked for this one, so
+  /// "it didn't work" is theirs to know — but the alert belongs to the caller,
+  /// not here.
+  @discardableResult
+  static func delete(id: Int64) -> Bool {
+    let ok = Database.write("delete(id:)") { db in
       try db.execute(sql: "DELETE FROM items WHERE id = ?", arguments: [id])
-    }
+    } != nil
+    guard ok else { return false }
     ImageStore.sweepOrphans(referencedBy: imagePaths())
+    return true
   }
 
   /// The only bulk clear, and it never touches pinned rows. A
@@ -453,18 +608,27 @@ enum ItemRepository {
   ///
   /// Callers confirm first. The sweep runs against what is left rather than the
   /// empty set, so pinned rows keep their images.
-  static func deleteUnpinned() {
-    try? Database.shared.write { db in
+  ///
+  /// Returns whether the clear happened, and this is the one return value here
+  /// that is not optional politeness: the user read a count, clicked Clear, and
+  /// walked away believing the history is gone. If the write failed it is all
+  /// still there, and that is a privacy outcome rather than a cosmetic one, so
+  /// the caller has to be able to say so.
+  @discardableResult
+  static func deleteUnpinned() -> Bool {
+    let ok = Database.write("deleteUnpinned") { db in
       try db.execute(sql: "DELETE FROM items WHERE pinned = 0")
-    }
+    } != nil
+    guard ok else { return false }
     ImageStore.sweepOrphans(referencedBy: imagePaths())
+    return true
   }
 
   /// Clears every pin and its slot, keeping the rows. Not destructive — nothing
   /// is deleted and no image is swept — so it does not confirm. A no-op with
   /// nothing pinned, because the UPDATE simply matches no rows.
   static func unpinAll() {
-    try? Database.shared.write { db in
+    Database.write("unpinAll") { db in
       try db.execute(sql: "UPDATE items SET pinned = 0, pin_slot = NULL WHERE pinned = 1")
     }
   }
@@ -474,7 +638,7 @@ enum ItemRepository {
   /// results whenever the panel was last used to search — either would make the
   /// alert understate what is about to go.
   static func counts() -> (total: Int, pinned: Int) {
-    let row = try? Database.shared.read { db in
+    let row = Database.read("counts") { db in
       try Row.fetchOne(db, sql: "SELECT COUNT(*) AS total, COALESCE(SUM(pinned), 0) AS pinned FROM items")
     }
     guard let row = row ?? nil else { return (0, 0) }

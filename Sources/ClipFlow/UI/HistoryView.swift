@@ -299,11 +299,19 @@ struct HistoryView: View {
 
   private func paste(_ itemID: Int64, plainText: Bool) {
     selection = itemID
-    Clipboard.copy(itemID: itemID, plainText: plainText)
+    let copied = Clipboard.copy(itemID: itemID, plainText: plainText)
     // Closed immediately, without copy()'s confirmation beat: the text arriving
     // in the other app is the confirmation, and PRD HP-2's timing problem only
     // starts once the panel is gone.
     onClose()
+    // Nothing was written, so the pasteboard still holds whatever the user copied
+    // last. Pressing Return and getting nothing is confusing; pressing Return and
+    // having the *previous* clipboard item land in the document is worse, and this
+    // app's clipboard history is exactly the place a password can be sitting.
+    // `Clipboard.copy` has already logged why. No alert: the panel is on its way
+    // out, the failure is rare, and a modal over the app the user was typing in
+    // costs more than the silence does.
+    guard copied else { return }
     Paster.paste()
   }
 

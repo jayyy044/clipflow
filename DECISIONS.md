@@ -902,6 +902,110 @@ not.
 
 ---
 
+## D-23: A copy that did not write the pasteboard must not paste, and is not a use
+
+`Clipboard.copy` returned `Void` and had three early returns that fire *before*
+`clearContents()` — row gone, image file missing, text row with nil content. Those
+returns are right on their own: bailing before clearing is what stops a missing
+file emptying the user's pasteboard. The bug was that callers could not tell.
+
+Both call sites then posted Cmd+V unconditionally. So pressing Return on a row
+whose file had vanished pasted **the previous clipboard item** into the document
+the user was editing, silently. In an app whose entire purpose is retaining
+everything you have ever copied, that stale item can be a password.
+
+`copy` now returns `Bool` and both paste sites guard on it. `markUsed` moved behind
+the success path too — a failed copy is not a use, and floating the broken row to
+the top would make it easier to hit again.
+
+No alert on the failure path. The panel is already dismissing, the failure is rare,
+and a modal thrown over the app the user was mid-sentence in costs more attention
+than the silence does; the failure is logged instead. Direct complement to D-22 —
+making Enter paste by default is what moved this from a modified chord onto the
+default action, which is what made it worth fixing now.
+
+---
+
+## D-24: App exclusion is decided over a window, and fails closed
+
+FR-7.2's exclusion check sampled `NSWorkspace.shared.frontmostApplication` inside
+`capture()`. That is up to ~780 ms after the copy — 500 ms timer interval, 200 ms
+tolerance, 80 ms settle — and `changeCount` only says a copy happened *somewhere*
+in that span. macOS cannot be asked who was frontmost at a past instant, which is
+the same reason this class polls at all (HP-1).
+
+So the check ran against whatever the user Cmd+Tabbed *into*. Copy a password from
+an excluded password manager, switch to the app you are pasting into, and the
+exclusion passed and the password was written to SQLite and the FTS index in
+plaintext under the wrong `source_bundle_id`. The feature worked only if you
+copied and then sat still, and failed in the case you would add an app to the list
+for.
+
+Frontmost is now recorded as it changes, via
+`NSWorkspace.didActivateApplicationNotification`. Every tick closes a window
+covering "previous poll → now" and hands it to `capture()`. **One excluded app
+anywhere in that window drops the copy.** Losing an item costs a second Cmd+C; a
+password in a searchable plaintext database cannot be taken back.
+
+Stated honestly, because the old comment claimed a guarantee the code did not
+provide: this is *not* "the app the copy came from is not excluded" — that is
+unknowable. It is both wider (copy normally, switch into an excluded app, item
+dropped too) and narrower than the Settings list reads. Two holes remain, neither
+closed by construction: an activation notification still queued when the tick fires
+lands in the following window, and the first window after waking begins at the
+sleep gap rather than at a poll.
+
+`source_bundle_id` takes the **first** app in the window rather than nil when the
+window is ambiguous. The ambiguous case is not symmetric — a window holds two apps
+only when the user copied *and* switched inside ~500 ms, and the overwhelmingly
+common reason to do that is copying in order to paste elsewhere. Attribution is
+display and search only; the exclusion decision above is made against every app in
+the window independently, so a wrong guess costs a wrong icon, never a stored
+secret.
+
+---
+
+## D-25: An unopenable database is quarantined, never deleted — and only when it is actually corrupt
+
+Opening the database used to `fatalError`. In a menu-bar app with no Dock icon that
+reads as "the icon stopped appearing", and it repeats on every launch: a corrupt
+WAL or a bug in a future migration bricked the app permanently with nothing on
+screen saying why. A clipboard manager that will not start is losing history you
+can never get back, which is the same argument that justifies launch-at-login.
+
+Now: open, and on failure move the existing files aside to
+`clipflow.sqlite.corrupt-<stamp>` and open a fresh one, with an alert naming both
+that path and `images.noindex`. Nothing is deleted or overwritten in any branch —
+D-15 already records that the images are the unrecoverable half. The `-wal`/`-shm`
+siblings move too; a stale WAL left beside a new database gets replayed into it,
+which is how recovering from corruption turns into causing it. If the fresh open
+also fails, the app runs on an in-memory queue: nothing persists, which is worse
+than working and better than an app that will not start.
+
+**Only genuine corruption earns the quarantine.** `SQLITE_CORRUPT` and
+`SQLITE_NOTADB` mean reopening fails forever. `SQLITE_BUSY`, `SQLITE_CANTOPEN`,
+`SQLITE_IOERR` and `SQLITE_FULL` describe a machine having a bad moment and can
+clear on their own — renaming a healthy history aside for one of those would be the
+worst outcome available, since the fault passes and the user reopens to an empty
+ClipFlow with their real history under a name only an alert disclosed. Unrecognised
+errors fall through to the degraded branch: not knowing what is wrong is the
+strongest reason not to touch the only copy.
+
+Verified both branches on a scratch data directory. A garbage file quarantined and
+opened fresh. A healthy database made unreadable — `SQLite error 14`, with the
+directory still writable, so a rename would have succeeded had one been attempted —
+was left byte-identical with no quarantine file.
+
+**The worst instance of swallowed errors was not on the audited list.**
+`imagePaths()` returned `Set(paths ?? [])`, the empty set on a failed read, and
+`ImageStore.sweepOrphans(referencedBy:)` deletes every file the passed set does not
+name. One unreadable page and every stored image is deleted. It now returns
+everything already in `images.noindex` on failure — reference everything, sweep
+nothing. All nine `try?` writes and six `try?` reads went behind helpers that log
+what failed; `markUsed` stays deliberately best-effort.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a

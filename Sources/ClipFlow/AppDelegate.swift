@@ -175,7 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // open — it holds key focus, and DECISIONS S-12's capture must not see it.
     panel.close()
     Paster.captureTargetApp()
-    Clipboard.copy(itemID: itemID)
+    // Same reason the empty slot above does nothing: if the copy did not happen,
+    // the pasteboard still holds the user's previous clipboard contents, and
+    // pasting those into whatever they are typing in is worse than the shortcut
+    // appearing inert. `Clipboard.copy` logs which failure it was.
+    guard Clipboard.copy(itemID: itemID) else { return }
     Paster.paste()
   }
 
