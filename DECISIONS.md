@@ -921,9 +921,17 @@ nice-to-have.
   and only capture if it held. Also treat `IsSecureEventInputEnabled()` as a
   skip signal.
 - **S-3. G5 is overpromised.** `ConcealedType` is not set by `pass`, `gpg`,
-  `echo $TOKEN`, `kubectl get secret`, or several browser autofill paths.
-  "Never records credentials" is true only for apps that mark concealed, plus
-  the exclusion list. Documented limit, not a solved problem.
+  `echo $TOKEN`, or `kubectl get secret`. "Never records credentials" is true only
+  for apps that mark concealed, plus the exclusion list. Documented limit, not a
+  solved problem.
+
+  Narrowed 2026-07-31 by testing rather than assumption: this originally also
+  claimed "several browser autofill paths". Copying from Google Password Manager
+  in Chrome stored **nothing** — row count unchanged, no new item. Browsers'
+  password managers do mark their own copy action. What stays unprotected is a
+  *manual* copy: selecting a password out of a form field by hand is ordinary
+  text, and no password manager is involved to mark it. The distinction is the
+  manager's copy button versus your own Cmd+C, not browsers versus native apps.
 - **S-4. No max item size.** `cat huge.log | pbcopy` puts tens of MB into SQLite
   and FTS in one copy, breaking both the 5 MB DB budget and the 60 MB memory
   budget. Cap at ~1 MB; skip or truncate above. Same cap gates `NSDataDetector`.
