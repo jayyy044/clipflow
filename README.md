@@ -101,12 +101,20 @@ Chrome, which stored nothing.
 
 **That guarantee stops where the marking stops.** Plenty of ways to move a secret
 through the clipboard set no concealed type at all — `pass`, `gpg`,
-`echo $TOKEN | pbcopy`, `kubectl get secret`. The same applies to selecting a
+`kubectl get secret`. The same applies to selecting a
 password by hand in a form field and pressing Cmd+V: a manual copy is just text,
 whatever it happens to contain, and the password manager never sees it to mark it.
 Using the manager's own copy button is what gets you the protection. If the source
 does not mark it, ClipFlow stores it like any other text. The app exclusion list is
 the blunt instrument for that. See DECISIONS S-3.
+
+**Issued tokens are recognised by shape and never stored**, which covers the most
+common way a secret reaches the clipboard on a developer's machine: GitHub, GitLab,
+AWS, Google, Slack, Stripe, npm and OpenAI/Anthropic key formats, plus PEM private
+key blocks. Only a bare token alone on the clipboard is dropped — a note or code
+snippet that merely mentions one is kept, so the check does not quietly eat things
+you meant to keep. A plain password out of `pass` or `gpg` has no shape to match
+and is still stored; the exclusion list remains the only lever for those.
 
 ## Performance
 

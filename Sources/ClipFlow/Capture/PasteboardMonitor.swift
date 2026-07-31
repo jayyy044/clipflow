@@ -403,11 +403,59 @@ final class PasteboardMonitor {
   }
 
   @MainActor
+  /// Issuer prefixes for tokens that are credentials and nothing else. Kept as
+  /// prefixes rather than entropy scoring on purpose: entropy also flags UUIDs,
+  /// hashes, base64 payloads and minified code, and a clipboard manager that
+  /// silently swallows things you meant to keep stops being trusted — which is a
+  /// worse outcome than the gap it closes.
+  private static let credentialPrefixes = [
+    "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",  // GitHub
+    "glpat-",                                               // GitLab
+    "sk-", "sk-ant-",                                       // OpenAI, Anthropic
+    "AKIA", "ASIA",                                         // AWS access key ids
+    "AIza",                                                 // Google
+    "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-",            // Slack
+    "npm_", "dop_v1_", "shpat_", "sq0atp-", "rk_live_", "sk_live_",
+  ]
+
+  /// What this catches, stated honestly, because S-3 should not be re-closed on a
+  /// claim it does not support: issued tokens and PEM private keys. It does *not*
+  /// catch a plain password out of `pass` or `gpg` — those have no shape to match,
+  /// and the app exclusion list remains the only lever for them.
+  ///
+  /// The single-token requirement is what keeps false positives near zero. A
+  /// README, a code snippet or a shell command that merely *mentions* one of these
+  /// prefixes carries whitespace and is stored normally; only a bare token, alone
+  /// on the pasteboard, is dropped. That is exactly the shape `… | pbcopy`
+  /// produces and almost never the shape ordinary copied text has.
+  static func looksLikeCredential(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // PEM blocks are multi-line by definition, so they cannot use the rule below.
+    if trimmed.hasPrefix("-----BEGIN"), trimmed.contains("PRIVATE KEY") { return true }
+
+    guard trimmed.count >= 20, !trimmed.contains(where: \.isWhitespace) else { return false }
+    return credentialPrefixes.contains { trimmed.hasPrefix($0) }
+  }
+
   private func textItem(app: NSRunningApplication?, at now: Int64) -> Item? {
     guard let content = pasteboard.string(forType: .string),
           !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
           content.utf8.count <= Self.maxContentBytes
     else { return nil }
+
+    // DECISIONS S-3 conceded that `ConcealedType` covers password managers and
+    // nothing else, so anything piped through a terminal is stored in plaintext
+    // and indexed for search. This closes the highest-value part of that: API
+    // tokens and private keys, which are the credentials that actually leak, and
+    // the ones a developer's clipboard carries most often.
+    //
+    // Deliberately never logs the content, only that a copy was dropped — a
+    // secret written to the system log is the bug this exists to prevent.
+    if Self.looksLikeCredential(content) {
+      NSLog("ClipFlow: skipped a copy that looks like a credential")
+      return nil
+    }
 
     // FR-1.2 ranks `public.rtf` above plain text, but both are the same kind of
     // item — so RTF is an extra representation on a text row, not a different

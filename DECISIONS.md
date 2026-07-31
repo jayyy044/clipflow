@@ -1130,6 +1130,41 @@ binding in this file is not working because it compiles.
 
 ---
 
+## D-29: Issued tokens are dropped by shape; plain passwords still are not
+
+S-3 conceded that `ConcealedType` covers password managers and nothing else, so
+anything piped through a terminal lands in a plaintext, FTS-indexed database. That
+was acceptable for a personal tool. It is a different proposition for a project
+people clone and install — and the audience for a build-it-yourself Swift clipboard
+manager is developers, whose clipboards carry tokens constantly.
+
+So `textItem` now drops content matching known credential shapes: GitHub
+(`ghp_`, `github_pat_`, …), GitLab, AWS access key ids, Google, Slack, Stripe, npm,
+DigitalOcean, Shopify, Square, OpenAI/Anthropic, and PEM `PRIVATE KEY` blocks.
+
+**Prefixes, not entropy.** Entropy scoring also flags UUIDs, hashes, base64 payloads
+and minified code. A clipboard manager that silently swallows things you meant to
+keep stops being trusted, and losing that is worse than the gap it closes. The
+single-token requirement does the same work: a bare token alone on the pasteboard is
+dropped, while a README, a code snippet or a shell command that merely *mentions* a
+prefix carries whitespace and is kept. That is exactly the shape `… | pbcopy`
+produces and almost never the shape ordinary copied text has.
+
+**What it does not catch, said plainly so S-3 is not re-closed on a claim it cannot
+support:** a plain password out of `pass` or `gpg`. Those have no shape. The app
+exclusion list is still the only lever for them, and S-3 stays open on that point.
+
+The skip logs that a copy was dropped and never what it contained — a secret written
+to the system log is the bug this exists to prevent.
+
+Verified end to end against the real capture path, with false-positive controls in
+the same run. Dropped: a `ghp_` token, an `AKIA` key, an `sk-ant-` key, a PEM block.
+Kept: a sentence mentioning `ghp_`, an ordinary URL, and
+`hunter2correcthorsebatterystaple` — the last one demonstrating the documented gap
+rather than hiding it.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a
