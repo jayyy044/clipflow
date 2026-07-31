@@ -420,4 +420,38 @@ enum ItemRepository {
     // With no rows left, every file in the directory is an orphan.
     ImageStore.sweepOrphans(referencedBy: [])
   }
+
+  /// FR-7.5's other half. A separate action rather than a checkbox on one alert:
+  /// the two differ in what they destroy, and a checkbox is the kind of state a
+  /// user misremembers exactly once.
+  ///
+  /// The sweep is against what is left, not against the empty set — pinned rows
+  /// keep their images, which is the whole difference from `deleteAll`.
+  static func deleteUnpinned() {
+    try? Database.shared.write { db in
+      try db.execute(sql: "DELETE FROM items WHERE pinned = 0")
+    }
+    ImageStore.sweepOrphans(referencedBy: imagePaths())
+  }
+
+  /// Clears every pin and its slot, keeping the rows. Not destructive — nothing
+  /// is deleted and no image is swept — so it does not confirm. A no-op with
+  /// nothing pinned, because the UPDATE simply matches no rows.
+  static func unpinAll() {
+    try? Database.shared.write { db in
+      try db.execute(sql: "UPDATE items SET pinned = 0, pin_slot = NULL WHERE pinned = 1")
+    }
+  }
+
+  /// What the confirmation alerts name. Counted in SQLite rather than off
+  /// `History.shared.items`, which is capped at 500 rows and holds search
+  /// results whenever the panel was last used to search — either would make the
+  /// alert understate what is about to go.
+  static func counts() -> (total: Int, pinned: Int) {
+    let row = try? Database.shared.read { db in
+      try Row.fetchOne(db, sql: "SELECT COUNT(*) AS total, COALESCE(SUM(pinned), 0) AS pinned FROM items")
+    }
+    guard let row = row ?? nil else { return (0, 0) }
+    return (row["total"], row["pinned"])
+  }
 }

@@ -662,6 +662,105 @@ invalidates the app's own signature.
 
 ---
 
+## D-19: Settings is a hand-built `NSWindow`, and the status menu keeps the bulk actions
+
+D-2 chose `NSStatusItem` + `NSPanel` over `MenuBarExtra`, which means `main.swift`
+drives `NSApplication` directly and there is no SwiftUI `App` type in the
+project. A `Settings {}` scene therefore has nowhere to be declared and
+`SettingsLink` has no scene to point at — checked before writing anything, not
+assumed. The window is an `NSWindow` holding an `NSHostingView`, created once and
+reopened.
+
+Two consequences of `.accessory` that a normal app never hits:
+
+- The app has to be activated (`NSApp.activate`) before the window can take key
+  focus, and without key focus `KeyboardShortcuts.Recorder` cannot record —
+  clicking a recorder in an inactive window does nothing at all.
+- The app stays *active* after the window closes, with no windows left. The next
+  copy would then be attributed to ClipFlow rather than to the app the user is
+  typing in, because `source_bundle_id` is `NSWorkspace.frontmostApplication`.
+  `NSApp.hide(nil)` in `windowWillClose` hands frontmost back.
+
+**Bulk actions stayed in the status menu.** FR-7.5's two clears, and "Unpin All",
+are one-shot commands, not preferences — they have no state to display and
+nothing to remember. Putting them in Settings would mean opening a window to run
+a command and then closing it again, and would leave the menu's existing
+`Clear History…` behaviour split across two surfaces. Settings holds only what
+persists: launch at login, pause, shortcuts, the exclusion list.
+
+**The exclusion list is UserDefaults, not a table.** It is read on the copy path,
+on every capture, and the whole payload is a handful of bundle ids — a SQLite
+round trip per copy buys nothing. Bundle ids rather than names, because a name is
+localized and survives no rename, and the bundle id is what `PasteboardMonitor`
+already holds. FR-7.2's "managed by picking apps" is `NSOpenPanel` filtered to
+`.application`; an app with no bundle identifier is refused rather than stored,
+since it could never match a captured `source_bundle_id`.
+
+---
+
+## D-20: Pause persists, ignore-next-copy does not, and the icon is what makes that honest
+
+FR-7.4 and FR-7.3 look like the same switch and are not.
+
+**Pause is stored in UserDefaults and survives quitting.** Someone who paused
+capture did it for a reason that outlives one run of the app, and a pause that
+quietly lapses on the next launch resumes recording exactly when they thought it
+was off — the one outcome they were avoiding. This is only defensible because
+FR-7.4's other half exists: the menu bar icon is drawn with `appearsDisabled`
+while paused, so the state is visible without opening anything. Without the
+dimmed icon a persisted pause would be a hidden setting, and the app would look
+broken instead of paused.
+
+`appearsDisabled`, not `isEnabled`: the latter also stops the button responding
+to clicks, which would strand the user with no way back to the menu that
+un-pauses it.
+
+**Ignore-next-copy is not persisted.** "The next copy" means the next one;
+carrying it across a relaunch would silently eat a copy hours later. It is a
+toggle rather than a one-way arm, so an accidental Option-click is undone by
+another Option-click, and it shows as a filled glyph plus a tooltip because the
+menu-bar affordance FR-7.3 asks for is otherwise invisible. Option, not Command
+or Control: Command-drag is how macOS rearranges the menu bar, and Control-click
+is a right-click, which is already the menu.
+
+**It is spent in `tick()`, not in `capture()`.** Our own paste writes are
+filtered out immediately above by `ignoredChangeCount`, so arming it can never be
+consumed by the app's own pasteboard traffic — and spending it there suppresses
+the copy whatever it turns out to hold, including the sizes and types `capture()`
+would have dropped on its own.
+
+`isPaused` reads UserDefaults through rather than mirroring it into a stored
+property, so the poller and the Settings checkbox cannot disagree; it costs a
+cached CFPreferences lookup twice a second. Pause is still not a member of
+`suspendedBy` — D-16 stands.
+
+**Launch at login is now registered once, not on every launch.** FR-7.7 makes it
+a toggle, and the old unconditional `register()` at startup would undo the user's
+choice on the next restart — precisely the restart the setting exists to control.
+A `didRegisterLaunchAtLogin` flag records that the offer was made; after that the
+toggle owns the state. The toggle reads `SMAppService.Status` rather than a
+boolean, because macOS commonly parks a successful `register()` at
+`.requiresApproval` and a plain checkbox would read "on" for an app that will not
+come back after a reboot.
+
+Verified against the live database with markers, live counts unchanged (24 rows,
+9 pinned) afterwards:
+
+```
+A  no exclusion, capture on    row inserted, source com.googlecode.iterm2
+B  frontmost app excluded      NO ROW   "skipped copy from excluded app com.googlecode.iterm2"
+C  exclusion removed           row inserted
+D  capture paused              NO ROW
+E  unpaused                    row inserted
+```
+
+The clears and unpin-all were exercised as SQL against a scratch copy, never the
+live database (D-15): clear-unpinned left 9 rows with slots 1..9 intact and kept
+a pinned image's `image_path` in the set handed to `sweepOrphans`; unpin-all left
+24 rows with every slot NULL and reported 0 changes on a second run.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a
@@ -796,10 +895,6 @@ nice-to-have.
   selected in Finder become one row or three? `Enter` must write
   `public.file-url`, not the path as text. What is the preview and the icon?
   Resolve before implementing `kind='file'`.
-- **`Clear History…` clears pinned items too.** FR-7.5 wants "clear unpinned" and
-  "clear everything" as two separate destructive actions. There is one, and it
-  takes the pins with it. It confirms first and names the count, so it is not
-  silent — but a user who pinned nine things does not expect them in scope.
-  Belongs with the rest of Phase 9's settings work.
-
-Resolved since: `pin_slot` allocation rules, see D-14.
+Resolved since: `pin_slot` allocation rules, see D-14. `Clear History…` taking
+pinned items with it — split into `Clear Unpinned History…` and
+`Clear All History…`, see D-19/D-20.

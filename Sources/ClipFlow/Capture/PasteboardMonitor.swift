@@ -62,7 +62,19 @@ final class PasteboardMonitor {
   /// (DECISIONS S-1). Phase 4 will call `ignoreNextChange()` from the paster.
   private var ignoredChangeCount: Int?
 
-  var isPaused = false
+  /// FR-7.4. Deliberately not a member of `suspendedBy`: a user who paused and a
+  /// machine that went to sleep are different states, and waking must not
+  /// un-pause anyone (DECISIONS D-16).
+  ///
+  /// Read through rather than mirrored into a stored property, so there is one
+  /// copy of the answer and no way for the timer and the checkbox to disagree.
+  /// Costs a cached CFPreferences lookup twice a second.
+  var isPaused: Bool { Preferences.isPaused }
+
+  /// FR-7.3. Not persisted and not a counter — "the next copy" means the next
+  /// one, so quitting with it armed disarms it rather than surprising the user
+  /// on a later launch.
+  private(set) var ignoresNextCapture = false
 
   private init() {
     lastChangeCount = pasteboard.changeCount
@@ -153,6 +165,28 @@ final class PasteboardMonitor {
     ignoredChangeCount = changeCount
   }
 
+  /// FR-7.4 and FR-7.3 both have two front ends — the status menu and the
+  /// Settings window — so both go through one setter that announces the change.
+  /// Anything drawing this state (the menu bar icon, the Settings checkbox)
+  /// listens rather than polls, which is what keeps them from disagreeing after
+  /// an armed capture is spent by a copy the user made somewhere else.
+  func setPaused(_ paused: Bool) {
+    guard paused != isPaused else { return }
+    Preferences.isPaused = paused
+    NSLog("ClipFlow: capture \(paused ? "paused" : "unpaused") by user")
+    announceStateChange()
+  }
+
+  func setIgnoresNextCapture(_ ignores: Bool) {
+    guard ignores != ignoresNextCapture else { return }
+    ignoresNextCapture = ignores
+    announceStateChange()
+  }
+
+  private func announceStateChange() {
+    NotificationCenter.default.post(name: .clipFlowCaptureStateChanged, object: nil)
+  }
+
   private func tick() {
     let current = pasteboard.changeCount
     guard current != lastChangeCount else { return }
@@ -162,6 +196,17 @@ final class PasteboardMonitor {
 
     if ignoredChangeCount == current {
       ignoredChangeCount = nil
+      return
+    }
+
+    // FR-7.3, and it is spent here rather than in `capture()` for two reasons:
+    // our own paste writes are filtered out just above, so arming it can never be
+    // consumed by the app's own pasteboard traffic; and it suppresses the copy
+    // whatever it turns out to contain, including the sizes and types `capture()`
+    // would have rejected on its own.
+    if ignoresNextCapture {
+      NSLog("ClipFlow: ignored one copy on request")
+      setIgnoresNextCapture(false)
       return
     }
 
@@ -179,6 +224,16 @@ final class PasteboardMonitor {
     guard types.isDisjoint(with: Self.skipTypes) else { return }
 
     let app = NSWorkspace.shared.frontmostApplication
+
+    // FR-7.2. Checked against the app that is frontmost at capture time — the
+    // same one recorded as `source_bundle_id` — so exclusion means exactly what
+    // the list in Settings shows. Before anything is hashed or written: an
+    // excluded app's contents must not reach disk even long enough to be swept.
+    if let bundleID = app?.bundleIdentifier, Preferences.excludedBundleIDs.contains(bundleID) {
+      NSLog("ClipFlow: skipped copy from excluded app \(bundleID)")
+      return
+    }
+
     let now = Int64(Date().timeIntervalSince1970 * 1000)
 
     // FR-1.2's priority order, applied as a fixed sequence rather than by asking

@@ -1,0 +1,281 @@
+import AppKit
+import KeyboardShortcuts
+import ServiceManagement
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// Everything the user can change that is too small to earn a database column.
+///
+/// UserDefaults rather than a `settings` table: these are read on the copy path
+/// (`excludedBundleIDs` on every capture) and a SQLite round trip per copy buys
+/// nothing when the whole payload is a handful of strings.
+enum Preferences {
+  private static let excludedKey = "excludedBundleIDs"
+
+  /// FR-7.2. Bundle ids, not app names — a name is localized and changes with a
+  /// rename, and the bundle id is what `PasteboardMonitor` already has in hand.
+  static var excludedBundleIDs: Set<String> {
+    get { Set(UserDefaults.standard.stringArray(forKey: excludedKey) ?? []) }
+    set { UserDefaults.standard.set(newValue.sorted(), forKey: excludedKey) }
+  }
+
+  /// FR-7.4. Persisted, unlike FR-7.3's one-shot: someone who paused capture did
+  /// it for a reason that outlives one run of the app, and quietly resuming on
+  /// the next launch is the failure mode that actually costs them something.
+  /// Honest only because the dimmed icon says so at a glance — without FR-7.4's
+  /// other half this would be a hidden setting.
+  static var isPaused: Bool {
+    get { UserDefaults.standard.bool(forKey: "capturePaused") }
+    set { UserDefaults.standard.set(newValue, forKey: "capturePaused") }
+  }
+
+  /// Whether the first-launch registration in `AppDelegate` has already run.
+  /// Without it, FR-7.7's toggle is undone by the next launch re-registering.
+  static let didRegisterLaunchAtLoginKey = "didRegisterLaunchAtLogin"
+}
+
+/// FR-7.7. `SMAppService.Status` is the truth and it is not a boolean: macOS
+/// commonly parks a successful `register()` at `.requiresApproval`, so a plain
+/// checkbox would read "on" for an app that will not come back after a reboot.
+enum LaunchAtLogin {
+  static var status: SMAppService.Status { SMAppService.mainApp.status }
+
+  static func set(_ enabled: Bool) {
+    do {
+      if enabled {
+        try SMAppService.mainApp.register()
+      } else {
+        try SMAppService.mainApp.unregister()
+      }
+    } catch {
+      // Not fatal — the app still works, it just won't come back after a reboot.
+      NSLog("ClipFlow: launch at login \(enabled ? "register" : "unregister") failed: \(error.localizedDescription)")
+    }
+  }
+
+  /// Nil when the toggle alone is honest. Only the two states where it would lie
+  /// have something to say.
+  static func caveat(for status: SMAppService.Status) -> String? {
+    switch status {
+    case .requiresApproval:
+      return "Waiting for approval in System Settings › General › Login Items."
+    case .notFound:
+      return "Unavailable — ClipFlow is not running from an installed app bundle."
+    default:
+      return nil
+    }
+  }
+}
+
+/// DECISIONS D-2: there is no SwiftUI `App` here — `main.swift` drives
+/// `NSApplication` directly — so a `Settings {}` scene does not exist to be
+/// opened, and `SettingsLink` has no scene to point at. The window is built by
+/// hand, and the app has to be activated first because an `.accessory` app is
+/// never active on its own and an inactive app's window cannot take key events —
+/// which the shortcut recorders need in order to record anything.
+@MainActor
+final class SettingsWindow: NSObject, NSWindowDelegate {
+  static let shared = SettingsWindow()
+  private var window: NSWindow?
+
+  func show() {
+    if window == nil {
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 480, height: 470),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+      )
+      window.title = "ClipFlow Settings"
+      // The window is created once and reopened; releasing it on close would
+      // leave `window` dangling.
+      window.isReleasedWhenClosed = false
+      window.delegate = self
+      window.center()
+      window.contentView = NSHostingView(rootView: SettingsView())
+      self.window = window
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    window?.makeKeyAndOrderFront(nil)
+  }
+
+  /// An `.accessory` app with no windows left still counts as active, and the
+  /// next copy would then be attributed to ClipFlow rather than to the app the
+  /// user is actually typing in (`source_bundle_id`).
+  func windowWillClose(_ notification: Notification) {
+    NSApp.hide(nil)
+  }
+}
+
+struct SettingsView: View {
+  var body: some View {
+    TabView {
+      GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
+      ShortcutSettings().tabItem { Label("Shortcuts", systemImage: "keyboard") }
+      ExclusionSettings().tabItem { Label("Excluded Apps", systemImage: "hand.raised") }
+    }
+    .padding(14)
+    .frame(width: 480, height: 470)
+  }
+}
+
+private struct GeneralSettings: View {
+  /// Re-read rather than stored: `SMAppService` state can change outside the app
+  /// (System Settings › Login Items), so a value cached at first draw goes stale.
+  @State private var loginStatus = LaunchAtLogin.status
+  @State private var paused = PasteboardMonitor.shared.isPaused
+
+  var body: some View {
+    Form {
+      Section {
+        Toggle("Launch ClipFlow at login", isOn: Binding(
+          // `.requiresApproval` reads as on: the user asked for it and the
+          // request is filed. The caveat below says what is still missing.
+          get: { loginStatus == .enabled || loginStatus == .requiresApproval },
+          set: {
+            LaunchAtLogin.set($0)
+            loginStatus = LaunchAtLogin.status
+          }
+        ))
+        if let caveat = LaunchAtLogin.caveat(for: loginStatus) {
+          HStack {
+            Text(caveat).font(.caption).foregroundStyle(.secondary)
+            if loginStatus == .requiresApproval {
+              Button("Open") { SMAppService.openSystemSettingsLoginItems() }
+                .controlSize(.small)
+            }
+          }
+        }
+      }
+
+      Section {
+        // FR-7.4. The same switch the status menu flips — one setter, so the
+        // menu bar icon and this checkbox can never disagree.
+        Toggle("Pause capture", isOn: Binding(
+          get: { paused },
+          set: { PasteboardMonitor.shared.setPaused($0) }
+        ))
+      } footer: {
+        Text("Nothing is recorded while paused, and the menu bar icon is dimmed. Pausing survives sleep, wake and quitting.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .formStyle(.grouped)
+    // The menu can pause too, and the status item's own "Ignore Next Copy" can
+    // be spent while this window is open.
+    .onReceive(NotificationCenter.default.publisher(for: .clipFlowCaptureStateChanged)) { _ in
+      paused = PasteboardMonitor.shared.isPaused
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+      loginStatus = LaunchAtLogin.status
+    }
+  }
+}
+
+/// FR-6.2. The recorders are the whole feature: `KeyboardShortcuts` stores the
+/// binding itself, so nothing here reads or writes a preference.
+///
+/// This also retires a real papercut. A default written in code only applies on
+/// a machine that has never run the app — after that the stored value wins, and
+/// the only fix was `defaults delete com.jayyy044.clipflow KeyboardShortcuts_…`
+/// from a terminal. "Restore Defaults" is that command, in the app.
+private struct ShortcutSettings: View {
+  var body: some View {
+    Form {
+      Section("Open ClipFlow") {
+        KeyboardShortcuts.Recorder("Show history", name: .toggleHistory)
+      }
+      Section {
+        ForEach(Array(KeyboardShortcuts.Name.pasteSlots.enumerated()), id: \.offset) { index, name in
+          KeyboardShortcuts.Recorder("Paste slot \(index + 1)", name: name)
+        }
+      } header: {
+        Text("Pin Slots")
+      } footer: {
+        Text("Each slot pastes its pinned item without opening ClipFlow. Empty slots do nothing.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      Section {
+        Button("Restore Defaults") {
+          KeyboardShortcuts.reset([.toggleHistory] + KeyboardShortcuts.Name.pasteSlots)
+        }
+      }
+    }
+    .formStyle(.grouped)
+  }
+}
+
+/// FR-7.2, "managed in Settings by picking apps" — so the picker is `NSOpenPanel`
+/// filtered to applications, not a text field for bundle ids.
+private struct ExclusionSettings: View {
+  @State private var excluded = Preferences.excludedBundleIDs.sorted()
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("Nothing copied while one of these apps is frontmost is recorded.")
+        .font(.callout)
+        .foregroundStyle(.secondary)
+
+      List {
+        ForEach(excluded, id: \.self) { bundleID in
+          HStack(spacing: 8) {
+            Image(nsImage: AppIcon.forBundleID(bundleID))
+              .resizable()
+              .frame(width: 18, height: 18)
+            // The bundle id is the fallback, not the label: an excluded app that
+            // has since been uninstalled still has to be identifiable and
+            // removable.
+            Text(Self.name(for: bundleID) ?? bundleID)
+            Spacer()
+            Button {
+              excluded.removeAll { $0 == bundleID }
+              Preferences.excludedBundleIDs = Set(excluded)
+            } label: {
+              Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.plain)
+            .help("Stop excluding this app")
+          }
+        }
+      }
+      .overlay {
+        if excluded.isEmpty {
+          Text("No apps excluded").foregroundStyle(.tertiary)
+        }
+      }
+
+      Button("Add App…", action: pickApps)
+    }
+    .padding(4)
+  }
+
+  private func pickApps() {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.application]
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = true
+    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+    panel.prompt = "Exclude"
+    guard panel.runModal() == .OK else { return }
+
+    var set = Preferences.excludedBundleIDs
+    for url in panel.urls {
+      // An app with no bundle identifier can never match a captured
+      // `sourceBundleID`, so storing it would be an entry that does nothing.
+      guard let bundleID = Bundle(url: url)?.bundleIdentifier else {
+        NSLog("ClipFlow: \(url.lastPathComponent) has no bundle identifier; not excluded")
+        continue
+      }
+      set.insert(bundleID)
+    }
+    Preferences.excludedBundleIDs = set
+    excluded = set.sorted()
+  }
+
+  private static func name(for bundleID: String) -> String? {
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+    return FileManager.default.displayName(atPath: url.path)
+  }
+}

@@ -4,6 +4,9 @@ import SwiftUI
 extension Notification.Name {
   static let clipFlowPanelDidOpen = Self("clipFlowPanelDidOpen")
   static let clipFlowOpenURL = Self("clipFlowOpenURL")
+  /// FR-7.3/FR-7.4: pause and ignore-next-copy are each settable from two places
+  /// and drawn in two more, so the state is announced rather than polled.
+  static let clipFlowCaptureStateChanged = Self("clipFlowCaptureStateChanged")
 }
 
 /// Spotlight-style floating panel that shows without stealing focus from the app
