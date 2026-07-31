@@ -761,6 +761,88 @@ a pinned image's `image_path` in the set handed to `sweepOrphans`; unpin-all lef
 
 ---
 
+## D-21: The NFR budgets, measured
+
+PRD §6 calls these acceptance thresholds rather than aspirations. Every number
+below was measured on the signed release build installed in `/Applications`, on
+Apple Silicon. Method is stated for each because "measured" without a method is
+just a nicer-sounding assertion.
+
+| Metric | Budget | Measured | |
+| --- | --- | --- | --- |
+| Idle resident memory | < 60 MB | **26 MB** | pass |
+| Idle CPU | < 0.1% | **0.033%** | pass |
+| Cold launch to menu bar ready | < 500 ms | **86–112 ms** | pass |
+| Search latency, 10k items | < 50 ms | **6 ms median, 36 ms worst** | pass |
+| OCR per screenshot | < 1.5 s | **321–366 ms** | pass |
+| Database size, 1000 text items | < 5 MB | **0.83 MB** | pass |
+| Hotkey to window visible | < 100 ms | **15 ms median, 35 ms first** | pass |
+
+**Memory** is `phys_footprint`, per D-6 — RSS is the wrong yardstick and the
+reasoning is recorded there rather than re-argued here. `footprint -p $(pgrep -x
+ClipFlow)`.
+
+**CPU** by differencing the process's consumed CPU time across a 90 s idle
+window rather than sampling `top`: 0.03 s of CPU over 90 s of wall clock. An
+instantaneous sample of a process that wakes twice a second mostly catches it
+asleep and flatters the number.
+
+**Cold launch** from `Timing.processStart`, which reads the exec timestamp out of
+the kernel's process table via `sysctl`, to the moment the status item is
+clickable. Timing from the first line of `main` would miss dyld, the Swift
+runtime, AppKit and SwiftUI — that is, most of a cold launch. Reported at the
+status item rather than at the end of `applicationDidFinishLaunching`, because
+the database, OCR queue and URL backfill all run after it and none of them gate
+the user.
+
+**Search** against a 10,000-row scratch database built from production's own
+schema, so the FTS5 configuration, indexes and triggers are identical. The exact
+production query — `MATCH`, `snippet()`, `bm25()` weighting, pinned-first
+ordering, `LIMIT 500` — run 25 times across six shapes: very common prefix,
+common word, two prefixes, a single rare row, three terms, and no matches. Worst
+single run of the whole set was 36 ms, on the query returning 500 rows from the
+most common prefix.
+
+Worth stating: retention keeps 100 items (S-18b), so the app cannot actually
+hold 10k. The measurement is a deliberate stress test well beyond real use, not
+a description of it.
+
+**OCR** timing the helper executable exactly as `OCRQueue` invokes it, process
+spawn included, on a real 3024×1964 screenshot. The spawn is the price of D-9's
+memory fix and it is in the number.
+
+**Database size** measured, then divided: 10,000 text rows including the FTS
+index occupy 8.5 MB, so 1,000 occupy 0.83 MB. Excludes images, which live on
+disk by design (FR-2.2).
+
+**Hotkey to window visible** over 15 real keypresses: 7.7–17.5 ms, median 15 ms,
+except the very first open of a launch at 35 ms — SwiftUI builds the view tree
+once and that cost lands on whichever open comes first. Measured from the top of
+`Panel.open` to after `makeKey()`, which is when the window is on screen and
+accepting keys rather than when the handler returns.
+
+The same run shows why the first list load reads 70 ms and every later one 0.5
+ms: the first one pays for opening the database and running migrations. Neither
+is on the path the hotkey budget covers.
+
+**NFR-1** holds — Swift and SwiftUI throughout, no webview. **NFR-3** holds — the
+dependency graph is exactly `grdb.swift` and `keyboardshortcuts`.
+
+**NFR-2 was failing and is now fixed.** `lipo -archs` on the shipped binary
+reported `arm64` alone: SPM builds for the host architecture unless told
+otherwise, and nothing ever told it. Every "universal binary" claim up to this
+point was untrue and nobody had checked. `make bundle` now passes `--arch arm64
+--arch x86_64`, which also moves the output to `.build/apple/Products/Release`.
+Both the app and the OCR helper are now `x86_64 arm64`, the bundle still
+verifies `--deep --strict`, and idle footprint is unchanged at 26 MB.
+
+Worth noting as method rather than result: this is the only budget that failed,
+and it failed silently for the entire build. Nothing surfaces it except running
+the check — which is the argument for §6 being acceptance criteria that get
+measured rather than intentions that get asserted.
+
+---
+
 ## Spec fixes to fold into the code
 
 Ordered by the phase they belong in. Each is a latent bug in PRD v1, not a

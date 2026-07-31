@@ -35,11 +35,21 @@ final class History {
     let searching = fts != nil
 
     let observation = ValueObservation.tracking { db in try request.fetchAll(db) }
+    let started = ContinuousClock.now
+    var firstDelivery = true
     task = Task { @MainActor [weak self] in
       do {
         for try await items in observation.values(in: Database.shared) {
           self?.items = items
           self?.isSearching = searching
+          // NFR's search latency, measured to the point the rows are in hand
+          // rather than to the end of the query: the decode into ItemSummary is
+          // part of what the user waits for. Only the first delivery — later
+          // ones are the table changing under an open panel, not a search.
+          if firstDelivery {
+            firstDelivery = false
+            Timing.since(started, searching ? "search (\(items.count) rows)" : "list load (\(items.count) rows)")
+          }
         }
       } catch is CancellationError {
         // Superseded by the next keystroke.

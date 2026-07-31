@@ -48,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     statusItem.button?.action = #selector(statusItemClicked)
     statusItem.button?.target = self
     statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    // NFR's "cold launch to menu bar ready" — reported here rather than at the
+    // end of this method, because the icon is on screen and clickable from this
+    // point. The database, OCR queue and URL backfill below are all deliberately
+    // after it, and none of them gate the user.
+    Timing.sinceLaunch("menu bar ready")
     updateStatusIcon()
     // FR-7.3's arming can be spent by a copy made anywhere, and FR-7.4's pause is
     // settable from the Settings window as well as the menu, so the icon follows

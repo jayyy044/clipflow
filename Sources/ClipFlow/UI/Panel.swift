@@ -53,6 +53,7 @@ final class Panel<Content: View>: NSPanel {
   }
 
   func open(below statusButton: NSStatusBarButton?) {
+    let started = ContinuousClock.now
     // First statement in the method, deliberately: DECISIONS S-12 wants the
     // frontmost app read before anything of ours is on screen. Move this below
     // orderFrontRegardless and paste starts landing in ClipFlow.
@@ -66,6 +67,10 @@ final class Panel<Content: View>: NSPanel {
     // ClipFlow and we'd lose the frontmost app we need to paste into.
     orderFrontRegardless()
     makeKey()
+    // NFR's "hotkey to window visible". Measured to here rather than to the
+    // hotkey handler's return: the window is ordered in and key at this point,
+    // which is when the user can actually see and type into it.
+    Timing.since(started, "hotkey to window visible")
   }
 
   override func close() {

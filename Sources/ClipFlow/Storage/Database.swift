@@ -4,7 +4,40 @@ import GRDB
 enum Database {
   /// Also the root that `image_path` is relative to (FR-2.2), which is why it's
   /// named here rather than inlined into the queue's initializer.
-  static let directory = URL.applicationSupportDirectory.appending(path: "ClipFlow", directoryHint: .isDirectory)
+  ///
+  /// Redirectable to a scratch copy, because PRD §6 says to measure the budgets
+  /// at 10k items and there is no honest way to do that against the real
+  /// history: 10k rows trips FR-2.5 retention and evicts the user's items and
+  /// their image files with them. `URL.applicationSupportDirectory` does *not*
+  /// follow `HOME` — that assumption is what destroyed 13 screenshots
+  /// (DECISIONS D-15) — so the redirect is explicit, and it is only honoured
+  /// when the **resolved** path really is under a scratch root. Ignored, loudly,
+  /// otherwise.
+  static let directory: URL = {
+    let live = URL.applicationSupportDirectory.appending(path: "ClipFlow", directoryHint: .isDirectory)
+    guard let override = ProcessInfo.processInfo.environment["CLIPFLOW_DATA_DIR"] else { return live }
+    let resolved = URL(fileURLWithPath: override).standardizedFileURL.resolvingSymlinksInPath()
+    guard isScratch(resolved) else {
+      NSLog("ClipFlow: ignoring CLIPFLOW_DATA_DIR \(resolved.path) — not under a scratch root")
+      return live
+    }
+    NSLog("ClipFlow: using scratch data directory \(resolved.path)")
+    return resolved
+  }()
+
+  /// Both spellings of "temporary" on macOS: the per-user container
+  /// `NSTemporaryDirectory()` hands back, and `/tmp`, which resolves through a
+  /// symlink to `/private/tmp` and would fail a naive prefix check.
+  private static func isScratch(_ url: URL) -> Bool {
+    let roots = [NSTemporaryDirectory(), "/tmp"].map {
+      URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+    return roots.contains { url.path == $0 || url.path.hasPrefix($0 + "/") }
+  }
+
+  /// Whether the app is pointed at a scratch copy. Read by the seed command,
+  /// which refuses to insert anything anywhere else (DECISIONS D-15).
+  static var isScratchDirectory: Bool { isScratch(directory) }
 
   static let shared: DatabaseQueue = {
     let dir = directory

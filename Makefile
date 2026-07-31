@@ -1,5 +1,7 @@
 APP       := dist/ClipFlow.app
 BUNDLE_ID := com.jayyy044.clipflow
+# A multi-arch build lands here, not in .build/release.
+UNIVERSAL := .build/apple/Products/Release
 
 # macOS keys the Accessibility grant on bundle id + signing identity. With an
 # ad-hoc signature there is no identity, so the binary's own hash serves as one
@@ -19,14 +21,18 @@ all: bundle
 ## Assemble a real .app so the process survives the terminal that started it,
 ## and so it has a stable bundle identity for the Accessibility grant in Phase 4.
 bundle:
-	swift build -c release
+	# Both architectures, because NFR-2 asks for a universal binary and SPM builds
+	# only for the host unless told otherwise — it was silently arm64-only until
+	# someone actually ran `lipo -archs` on it. Costs a second compile; `make
+	# debug` stays host-only for iterating.
+	swift build -c release --arch arm64 --arch x86_64
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS
-	cp .build/release/ClipFlow $(APP)/Contents/MacOS/ClipFlow
+	cp $(UNIVERSAL)/ClipFlow $(APP)/Contents/MacOS/ClipFlow
 	# The OCR helper lives beside the main binary because that is how the app
 	# finds it — relative to its own executable, never by absolute path
 	# (DECISIONS D-9).
-	cp .build/release/ClipFlowOCR $(APP)/Contents/MacOS/ClipFlowOCR
+	cp $(UNIVERSAL)/ClipFlowOCR $(APP)/Contents/MacOS/ClipFlowOCR
 	cp Resources/Info.plist $(APP)/Contents/Info.plist
 	printf 'APPL????' > $(APP)/Contents/PkgInfo
 	@echo "signing as: $(SIGN_ID)"
