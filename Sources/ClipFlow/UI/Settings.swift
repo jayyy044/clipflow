@@ -81,7 +81,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
   func show() {
     if window == nil {
       let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 480, height: 470),
+        contentRect: NSRect(x: 0, y: 0, width: 480, height: 560),
         styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
@@ -115,7 +115,10 @@ struct SettingsView: View {
       ExclusionSettings().tabItem { Label("Excluded Apps", systemImage: "hand.raised") }
     }
     .padding(14)
-    .frame(width: 480, height: 470)
+    // Taller than it was: the Shortcuts tab now lists the seven fixed panel keys
+    // on top of the ten recorders, and at 470 the pin slots were already cut off
+    // mid-list with no hint there was more below.
+    .frame(width: 480, height: 560)
   }
 }
 
@@ -181,10 +184,49 @@ private struct GeneralSettings: View {
 /// the only fix was `defaults delete com.jayyy044.clipflow KeyboardShortcuts_…`
 /// from a terminal. "Restore Defaults" is that command, in the app.
 private struct ShortcutSettings: View {
+  /// Listed, not bound. These are `onKeyPress` handlers in `HistoryView` and one
+  /// `performKeyEquivalent` in `Panel` — there is no `KeyboardShortcuts.Name`
+  /// behind them, so there is nothing for a `Recorder` to record into, and making
+  /// them rebindable would mean a second parallel storage and conflict system for
+  /// keys that have no conflicts.
+  ///
+  /// Showing them is worth it anyway: nothing in the UI ever claimed these
+  /// existed, which is how Option+Delete shipped broken for the whole project
+  /// without anyone noticing it had never once worked (D-28).
+  ///
+  /// Source of truth is `HistoryView`'s key handling; this is a description of
+  /// it, and drifts if that changes.
+  private static let panelBindings: [(keys: String, action: String)] = [
+    ("↩", "Paste the selected item"),
+    ("⇧↩", "Paste as plain text"),
+    ("↑ ↓", "Move through the list"),
+    ("⌥P", "Pin or unpin the selected item"),
+    ("⌥⌫", "Delete the selected item"),
+    ("⌘O", "Open a link in the selected item"),
+    ("⎋", "Close the window"),
+  ]
+
   var body: some View {
     Form {
       Section("Open ClipFlow") {
         KeyboardShortcuts.Recorder("Show history", name: .toggleHistory)
+      }
+      Section {
+        ForEach(Self.panelBindings, id: \.keys) { binding in
+          LabeledContent(binding.action) {
+            Text(binding.keys)
+              .font(.body.weight(.medium))
+              .padding(.horizontal, 8)
+              .padding(.vertical, 3)
+              .liquidGlass(in: .rect(cornerRadius: 6))
+          }
+        }
+      } header: {
+        Text("In the History Window")
+      } footer: {
+        Text("Fixed, not rebindable. Typing filters the list as you go, and clicking a row pastes it.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
       Section {
         ForEach(Array(KeyboardShortcuts.Name.pasteSlots.enumerated()), id: \.offset) { index, name in
