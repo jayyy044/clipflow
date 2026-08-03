@@ -35,6 +35,13 @@ bundle:
 	cp $(UNIVERSAL)/ClipFlowOCR $(APP)/Contents/MacOS/ClipFlowOCR
 	cp Resources/Info.plist $(APP)/Contents/Info.plist
 	printf 'APPL????' > $(APP)/Contents/PkgInfo
+	# SPM resource bundles. `Bundle.module` traps rather than returning nil when
+	# its bundle is absent, and KeyboardShortcuts reaches for it to localize the
+	# Recorder's label — so a bundle without these died the instant the Shortcuts
+	# tab drew its first recorder. `swift run` worked because SPM leaves the
+	# bundles beside the binary; only the hand-assembled .app dropped them.
+	mkdir -p $(APP)/Contents/Resources
+	cp -R $(UNIVERSAL)/*.bundle $(APP)/Contents/Resources/
 	@echo "signing as: $(SIGN_ID)"
 	# Nested code first: the bundle signature seals whatever is inside it, so
 	# signing the app before the helper invalidates the app's own signature the
