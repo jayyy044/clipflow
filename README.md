@@ -140,8 +140,8 @@ recognition peaked at 113 MB. Spawning a process that exits brought the peak to
 ## Building
 
 ```
-make bundle      # build dist/ClipFlow.app
-make run         # build and run from dist/
+make bundle      # build dist.noindex/ClipFlow.app
+make run         # build and run from dist.noindex/
 make debug       # unbundled binary, host arch only, for iterating
 make clean
 ```

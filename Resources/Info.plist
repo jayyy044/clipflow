@@ -21,6 +21,12 @@
   <key>NSHighResolutionCapable</key>
   <true/>
 
+  <!-- LSUIElement keeps this out of the Dock, but Spotlight and Finder still
+       show it, and without an icon they draw a blank placeholder.
+       Regenerate with `swift Resources/make-icon.swift`. -->
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+
   <!-- Menu bar only: no Dock icon, no app switcher entry. main.swift also sets
        .accessory at runtime so the bare SPM binary behaves the same way. -->
   <key>LSUIElement</key>

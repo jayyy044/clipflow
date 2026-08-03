@@ -1,4 +1,6 @@
-APP       := dist/ClipFlow.app
+# `.noindex` so Spotlight skips the build output — otherwise the bundle here and
+# the one in /Applications both show up as separate ClipFlow results.
+APP       := dist.noindex/ClipFlow.app
 BUNDLE_ID := com.jayyy044.clipflow
 # A multi-arch build lands here, not in .build/release.
 UNIVERSAL := .build/apple/Products/Release
@@ -42,6 +44,10 @@ bundle:
 	# bundles beside the binary; only the hand-assembled .app dropped them.
 	mkdir -p $(APP)/Contents/Resources
 	cp -R $(UNIVERSAL)/*.bundle $(APP)/Contents/Resources/
+	# Spotlight and Finder draw a blank placeholder without this, even though
+	# LSUIElement keeps the app out of the Dock. Committed, not built — see
+	# Resources/make-icon.swift.
+	cp Resources/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	@echo "signing as: $(SIGN_ID)"
 	# Nested code first: the bundle signature seals whatever is inside it, so
 	# signing the app before the helper invalidates the app's own signature the
@@ -72,4 +78,4 @@ debug:
 	./.build/debug/ClipFlow
 
 clean:
-	rm -rf .build dist
+	rm -rf .build dist.noindex

@@ -16,5 +16,6 @@ DerivedData/
 ## Reference clones (Maccy et al) — read-only, never vendored
 reference/
 
-## Build output
-dist/
+## Build output. `.noindex` keeps Spotlight from listing this bundle alongside
+## the installed one in /Applications.
+dist.noindex/
