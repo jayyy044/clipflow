@@ -39,6 +39,12 @@ final class Panel<Content: View>: NSPanel {
     titlebarSeparatorStyle = .none
     isMovableByWindowBackground = true
     hidesOnDeactivate = false
+    // The content draws its own rounded glass (`HistoryView`). Without these the
+    // window paints an opaque rectangle behind it, so the glass has nothing to
+    // refract and the square corners show through the rounded ones.
+    isOpaque = false
+    backgroundColor = .clear
+    hasShadow = true
     standardWindowButton(.closeButton)?.isHidden = true
     standardWindowButton(.miniaturizeButton)?.isHidden = true
     standardWindowButton(.zoomButton)?.isHidden = true

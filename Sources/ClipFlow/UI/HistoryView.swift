@@ -71,6 +71,10 @@ struct HistoryView: View {
   /// panel opens. Explicit state rather than a `Date.now` buried in each row, so
   /// SwiftUI can actually see it change and re-render.
   @State private var now = Date.now
+  /// Screen position of the pointer the last time hovering was allowed to move
+  /// the selection. See `hovered(_:)` — this is what stops a scrolling list from
+  /// stealing the selection out from under the arrow keys.
+  @State private var mouseAnchor = NSEvent.mouseLocation
   /// Shown when an action the user took did not do what pressing the key implies.
   /// Pinning and deleting are both visible in the list on their own, so success
   /// says nothing here — it is only the cases that silently do nothing that are
@@ -102,7 +106,12 @@ struct HistoryView: View {
       }
     }
     .frame(minWidth: 320, minHeight: 200)
-    .background(.thinMaterial)
+    // The panel floats over whatever app you were typing in, which is the one
+    // place glass is the right material rather than a costume. The window itself
+    // is transparent (`Panel.init`) so there is something behind this to refract;
+    // the corner radius has to match the window's or the fill shows through at
+    // the corners.
+    .liquidGlass(in: .rect(cornerRadius: 12))
     // FR-3.5: 40ms after the last keystroke, not on every one. `.task(id:)`
     // cancels the pending sleep when the query changes again, which is the
     // debounce — no timer to manage.
@@ -162,8 +171,11 @@ struct HistoryView: View {
     }
     .onReceive(NotificationCenter.default.publisher(for: .clipFlowPanelDidOpen)) { _ in
       now = .now
-      // Opens with nothing selected: blue means "this is what you just picked",
-      // never "this is where the cursor happens to be". Hover covers the latter.
+      // Opens with nothing selected. Hovering selects now, so re-anchoring here is
+      // what keeps that true: the rows appear underneath wherever the pointer
+      // already was, and without this that counts as a hover and lights a row the
+      // user never pointed at. Moving the mouse a single pixel selects as normal.
+      mouseAnchor = NSEvent.mouseLocation
       selection = nil
       query = ""
       notice = nil
@@ -246,6 +258,26 @@ struct HistoryView: View {
   }
 
 
+  /// Hovering selects, the way it does in a menu — there is one highlight, and it
+  /// is wherever the pointer is.
+  ///
+  /// The guard is the whole reason this is not just `selection = id` on the row.
+  /// `onHover` cannot tell "the pointer moved onto this row" from "this row
+  /// scrolled under a pointer that has not moved", and the second one happens on
+  /// every arrow key: the list scrolls, a new row slides under the stationary
+  /// cursor, and the selection snaps back to it. Comparing the pointer's screen
+  /// position against where it was when hovering last won separates the two.
+  ///
+  /// Nothing clears the selection on hover-*out*, also matching a menu: leaving a
+  /// row leaves it lit, so the panel never ends up with nothing selected because
+  /// the pointer happened to drift into the search field.
+  private func hovered(_ itemID: Int64) {
+    let pointer = NSEvent.mouseLocation
+    guard pointer != mouseAnchor else { return }
+    mouseAnchor = pointer
+    selection = itemID
+  }
+
   /// Moves the selection through the list ourselves rather than letting `List`
   /// do it.
   ///
@@ -255,6 +287,10 @@ struct HistoryView: View {
   /// nothing.
   private func move(_ step: Int) -> KeyPress.Result {
     guard !history.items.isEmpty else { return .ignored }
+    // Re-anchor before moving. The move can scroll the list, which drags a
+    // different row under a pointer that never moved — `hovered(_:)` compares
+    // against this to tell that apart from a real mouse move.
+    mouseAnchor = NSEvent.mouseLocation
 
     guard let current = selection,
           let index = history.items.firstIndex(where: { $0.id == current })
@@ -403,22 +439,51 @@ struct HistoryView: View {
   }
 
   private var list: some View {
-    // `selection` plus a focused List is what makes the arrow keys work; there
-    // is no manual key handling here.
-    List(selection: $selection) {
-      if pinnedCount > 0 {
-        Section("Pinned") {
+    // Deliberately no `selection:` binding, and the style is `.plain` rather than
+    // `.sidebar`. Both draw a highlight of their own that cannot be turned off —
+    // `.listRowBackground(.clear)` does not reach it — so the row's accent fill
+    // landed *inside* the sidebar style's wider tinted capsule and every selected
+    // row wore a pale blue halo. Nothing here needs List's selection anyway: the
+    // arrow keys have been handled by `move(_:)` since the List stopped holding
+    // focus, and the rows paint themselves. Dropping the binding is what leaves a
+    // single clean fill.
+    //
+    // The cost is that scrolling to an offscreen selection is now ours too, hence
+    // the reader below.
+    ScrollViewReader { proxy in
+      List {
+        // No `Section`. The headers are ordinary rows, because a real section
+        // header drags the list's own separator along with it and there is no way
+        // to turn that off on macOS — `.listSectionSeparator(.hidden)` is an iOS
+        // modifier that silently does nothing here, which is how "Pinned" ended up
+        // with two rules under it, the list's and ours. Without sections there is
+        // one line and it is the one we drew.
+        //
+        // The labels are worth keeping either way: a pin only announces itself
+        // through the ⌃⌘N badge, and with nothing below to compare against there
+        // was no boundary to read.
+        if pinnedCount > 0 {
+          sectionHeader("Pinned")
           ForEach(history.items.prefix(pinnedCount), content: row)
-        }
-        Section {
+          sectionHeader("Recent")
           ForEach(history.items.dropFirst(pinnedCount), content: row)
+        } else {
+          ForEach(history.items, content: row)
         }
-      } else {
-        ForEach(history.items, content: row)
+      }
+      .listStyle(.plain)
+      .scrollContentBackground(.hidden)
+      // Rows carry their own height; without this the plain style pads every one
+      // to the system minimum and a list of one-line text rows reads twice as
+      // tall as the menus it is imitating.
+      .environment(\.defaultMinListRowHeight, 0)
+      // List used to do this as part of moving the selection. Arrowing past the
+      // bottom edge otherwise moves a selection you cannot see.
+      .onChange(of: selection) { _, moved in
+        guard let moved else { return }
+        proxy.scrollTo(moved, anchor: nil)
       }
     }
-    .listStyle(.sidebar)
-    .scrollContentBackground(.hidden)
     // Insets the whole scroll view, scroll indicator included, so the bar isn't
     // riding the panel's rounded edge. Padding rather than .contentMargins,
     // which insets the content but leaves the indicator where it was.
@@ -434,10 +499,44 @@ struct HistoryView: View {
     }
   }
 
+  /// The rule under the title is drawn here rather than left to the list.
+  /// `.plain` puts a section separator under the *first* header and not the
+  /// second, so "Pinned" had a line and "Recent" did not — and the knob that
+  /// controls it is not `.listRowSeparator`, which the rows need hidden for their
+  /// own reasons. Drawing both the same way is the only version that stays
+  /// symmetrical.
+  private func sectionHeader(_ title: String) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(title)
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+      Divider()
+    }
+    .padding(.horizontal, 8)
+    .padding(.top, 8)
+    .padding(.bottom, 2)
+    // Zeroed so the padding above is the only thing positioning this. Left to the
+    // list, the title got indented and the rule did not, so the line started to
+    // the left of the word it belonged to. Both sit at 8pt now, which is where the
+    // selection capsule's edge is.
+    .listRowInsets(EdgeInsets())
+    .listRowSeparator(.hidden)
+    .listRowBackground(Color.clear)
+  }
+
   @ViewBuilder
   private func row(_ item: ItemSummary) -> some View {
-    ItemRow(item: item, now: now)
-      .tag(item.id)
+    ItemRow(item: item, now: now, isSelected: item.id == selection)
+      // `.id`, not `.tag` — there is no selection binding for a tag to feed any
+      // more; this is what `ScrollViewReader.scrollTo` addresses.
+      .id(item.id)
+      .onHover { if $0 { hovered(item.id) } }
+      .listRowBackground(Color.clear)
+      .listRowSeparator(.hidden)
+      // The highlight has to be the row's full width minus a small inset, the way
+      // a menu's is. The plain style's default insets are built for a settings
+      // list and leave the fill floating in the middle of the row.
+      .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
       // Single click, not double: picking a clipboard entry is the whole point
       // of the panel being open, so there is nothing else a click would mean.
       // contentShape makes the blank space in the row clickable too.
@@ -501,8 +600,18 @@ struct HistoryView: View {
 struct ItemRow: View {
   let item: ItemSummary
   let now: Date
+  let isSelected: Bool
 
-  @State private var isHovered = false
+  /// Three styles rather than one. The timestamp, size hint and OCR snippet each
+  /// name `.secondary`/`.tertiary` themselves, and grey on accent blue is
+  /// unreadable — the three-argument `foregroundStyle` retargets the whole
+  /// hierarchy for the subtree, which is the only way to reach text that has
+  /// already chosen its own level.
+  private var textStyles: (AnyShapeStyle, AnyShapeStyle, AnyShapeStyle) {
+    isSelected
+      ? (AnyShapeStyle(.white), AnyShapeStyle(.white.opacity(0.75)), AnyShapeStyle(.white.opacity(0.55)))
+      : (AnyShapeStyle(.primary), AnyShapeStyle(.secondary), AnyShapeStyle(.tertiary))
+  }
 
   var body: some View {
     HStack(spacing: 8) {
@@ -585,17 +694,25 @@ struct ItemRow: View {
         .foregroundStyle(.secondary)
         .fixedSize()
     }
-    .padding(.vertical, 3)
-    .padding(.horizontal, 6)
+    .padding(.vertical, 5)
+    .padding(.horizontal, 8)
+    // The fill has to span the row, not shrink to the content, or the highlight
+    // stops short of the timestamp on rows with a narrow thumbnail.
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .foregroundStyle(textStyles.0, textStyles.1, textStyles.2)
     .background {
-      // Deliberately much weaker than the selection fill, so hover reads as
-      // "the mouse is here" and not as "this is what Enter will copy".
+      // One highlight, not two. There used to be a separate weak grey hover fill,
+      // which meant arrowing to one row while the cursor sat over another lit both
+      // at once and neither one told you what Return would act on. Hovering now
+      // *is* selecting (`HistoryView.hovered`), the way a menu behaves, so there
+      // is only ever one thing lit.
+      //
+      // Accent rather than a hardcoded blue: it follows System Settings ›
+      // Appearance, so a non-default accent doesn't leave one stray blue row.
       RoundedRectangle(cornerRadius: 6)
-        .fill(.primary.opacity(isHovered ? 0.09 : 0))
+        .fill(isSelected ? Color.accentColor : .clear)
     }
     .contentShape(.rect)
-    .onHover { isHovered = $0 }
-    .animation(.easeOut(duration: 0.12), value: isHovered)
   }
 
   /// A `FormatStyle` rather than a shared `RelativeDateTimeFormatter`: value
