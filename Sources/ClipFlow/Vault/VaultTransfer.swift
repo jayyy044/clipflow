@@ -152,32 +152,44 @@ enum VaultTransfer {
     return out
   }
 
-  /// Folds a transcribed recovery key back to the exact characters that were
-  /// derived from — case, dashes and the 0/O, 1/I/L confusions all vanish.
-  /// Anything that is not a recovery key is passed through untouched, because a
-  /// real passphrase's spaces and case are part of it.
+  /// Separators a transcribed key is plausibly written with. Anything else — a
+  /// comma, an apostrophe, a colon — is a character a passphrase chose, not a
+  /// gap between groups.
+  private static let separators: Set<Unicode.Scalar> = [" ", "-"]
+
+  /// Folds a transcribed recovery key back to the exact characters it was
+  /// derived from — case, dashes, spaces and the 0/O, 1/I/L confusions all
+  /// vanish.
   ///
-  /// Applied identically on both sides, so even a passphrase that happens to
-  /// look like a recovery key round-trips correctly; the only cost is that two
-  /// such passphrases differing by case would open each other's files.
+  /// **The check is on the whole input, not on a stripped residue.** Every
+  /// character has to be either a separator or, after the O→0 and I/L→1 folds, a
+  /// letter of the Crockford alphabet; one character outside that set and the
+  /// string is returned completely untouched. Counting only the alphanumerics
+  /// that survived stripping was the old bug: `My!Secret!Passphrase!2026Zk9q`
+  /// has 26 of them, so it was uppercased and folded, and every variation of the
+  /// user's case and punctuation opened the same file.
+  ///
+  /// Applied identically on both sides, so a passphrase that really is
+  /// key-shaped — 26 Crockford characters and nothing else — still round-trips;
+  /// the cost is that two such passphrases differing only by case or spacing
+  /// open each other's files. That is inherent to sniffing the shape at all.
   ///
   /// ponytail: shape sniffing rather than a flag in the file. A flag would say
   /// out loud which files are protected by a typed passphrase and therefore
   /// worth guessing at.
   private static func canonical(_ passphrase: String) -> String {
-    let stripped = passphrase.uppercased().unicodeScalars.filter {
-      CharacterSet.alphanumerics.contains($0)
-    }
-    guard stripped.count == 26 else { return passphrase }
     var folded = ""
-    for scalar in stripped {
+    for scalar in passphrase.uppercased().unicodeScalars {
       switch scalar {
+      case _ where separators.contains(scalar): continue
       case "O": folded.append("0")
       case "I", "L": folded.append("1")
-      default: folded.unicodeScalars.append(scalar)
+      default:
+        guard alphabet.contains(Character(scalar)) else { return passphrase }
+        folded.unicodeScalars.append(scalar)
       }
     }
-    guard folded.allSatisfy({ alphabet.contains($0) }) else { return passphrase }
+    guard folded.count == 26 else { return passphrase }
     return folded
   }
 

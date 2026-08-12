@@ -417,7 +417,7 @@ struct HistoryView: View {
       guard await VaultStore.unlock(onError: raise) else { return }
       vaultDraft = VaultDraft(
         title: "Move to Vault",
-        name: VaultStore.suggestedName(from: item.preview),
+        name: VaultStore.suggestedName(for: item),
         value: content,
         moveFromItemID: item.id
       )

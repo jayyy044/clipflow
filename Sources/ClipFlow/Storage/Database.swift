@@ -40,6 +40,27 @@ enum Database {
   /// which refuses to insert anything anywhere else (DECISIONS D-15).
   static var isScratchDirectory: Bool { isScratch(directory) }
 
+  /// The one file every branch of `shared` below is trying to open. Named here
+  /// because `isEphemeral` has to compare against it.
+  static let path: String = directory.appending(path: "clipflow.sqlite").path
+
+  /// Whether `shared` is the in-memory fallback rather than that file — the
+  /// last branch below, taken when the open failed for a reason that was not
+  /// corruption. The user's real database is intact on disk and simply
+  /// invisible for this session, which makes every count read off it a count of
+  /// nothing rather than a count of what is there.
+  ///
+  /// That distinction is not cosmetic anywhere a zero authorises an action.
+  /// `VaultKeys.masterKey` mints a fresh master key only when `vault_entries`
+  /// is empty, and here it reads empty over a vault full of rows it cannot see;
+  /// minting then overwrites the only key those rows can be opened with.
+  ///
+  /// Compared against the intended path rather than against SQLite's
+  /// `":memory:"`, so anything unexpected reads as ephemeral. That is the safe
+  /// direction: a false "ephemeral" costs a refusal the user can retry next
+  /// launch, a false "real" costs the vault.
+  static var isEphemeral: Bool { shared.path != path }
+
   /// Opening the database used to `fatalError`, which in a menu-bar app with no
   /// Dock icon reads as "the icon stopped appearing" and repeats on every launch:
   /// a corrupt WAL, a disk full during a migration, or a bug in a future
@@ -59,9 +80,7 @@ enum Database {
   /// Capture works for this session and nothing persists, which is worse than
   /// working and better than an app that will not start.
   static let shared: DatabaseQueue = {
-    let dir = directory
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let path = dir.appending(path: "clipflow.sqlite").path
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
     let failure: Error
     do { return try openMigrated(at: path) } catch { failure = error }

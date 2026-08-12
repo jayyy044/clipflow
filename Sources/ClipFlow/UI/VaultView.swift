@@ -82,11 +82,21 @@ enum VaultStore {
     }
   }
 
-  /// Nil when the session locked underneath us or the blob is corrupt. The caller
-  /// says which to the user; this deliberately returns no plaintext-shaped
-  /// placeholder.
-  static func open(_ row: VaultRow) -> String? {
-    try? VaultSession.shared.open(row.sealedValue)
+  /// Nil after reporting why, and never a plaintext-shaped placeholder.
+  ///
+  /// The two failures have to be worded differently. The session idling out
+  /// while the panel sat open is ordinary and recoverable — the fix is to unlock
+  /// again — whereas "Couldn't read that entry" is what makes people delete a
+  /// secret that was merely unreadable this once.
+  static func open(_ row: VaultRow, onError: (String) -> Void) -> String? {
+    do {
+      return try VaultSession.shared.open(row.sealedValue)
+    } catch VaultCrypto.Failure.locked {
+      onError("The vault locked. Unlock and try again.")
+    } catch {
+      onError("Couldn't read that entry.")
+    }
+    return nil
   }
 
   /// Seals and writes. **Insert first, then delete the history copy** — the
@@ -158,12 +168,21 @@ enum VaultStore {
     }
   }
 
-  /// First line of a history preview, trimmed and capped, as a starting name.
-  /// Just a suggestion — the sheet is editable.
-  static func suggestedName(from preview: String) -> String {
-    let line = preview.split(whereSeparator: \.isNewline).first.map(String.init) ?? preview
-    let trimmed = line.trimmingCharacters(in: .whitespaces)
-    return String(trimmed.prefix(40))
+  /// A starting name built from the row's metadata — never from its content.
+  ///
+  /// Names are sealed under `nameKey()`, which has no user-presence requirement
+  /// so the locked vault can still draw a readable list. Anything derived from
+  /// the item's text therefore ends up in the one column Touch ID does not
+  /// protect, and a pre-filled field shows no placeholder to warn about it. The
+  /// item this feature exists for is a copied SSN, whose preview *is* the SSN.
+  ///
+  /// No truncating, no sanitising, no "only when it looks safe": the source app
+  /// and the date are all this may ever see.
+  static func suggestedName(for item: ItemSummary) -> String {
+    let date = Date(timeIntervalSince1970: Double(item.copiedAt) / 1000)
+      .formatted(.dateTime.day().month(.abbreviated))
+    guard let app = item.sourceAppName, !app.isEmpty else { return "Clipboard, \(date)" }
+    return "From \(app), \(date)"
   }
 }
 
@@ -313,6 +332,13 @@ struct VaultView: View {
         .font(.caption)
         .foregroundStyle(.tertiary)
         .multilineTextAlignment(.center)
+      // The one thing the design cannot recover from, said once, where the first
+      // entry is about to be added. No dialog: the keys are bound to this Mac's
+      // Secure Enclave and an export made beforehand is the only way back.
+      Text("Entries are locked to this Mac. If it is erased, repaired or replaced, an export made beforehand is the only way to get them back — Settings › Vault.")
+        .font(.caption)
+        .foregroundStyle(.tertiary)
+        .multilineTextAlignment(.center)
     }
     .padding(.horizontal, 24)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -405,10 +431,7 @@ struct VaultView: View {
   private func use(_ entry: VaultRow) {
     Task {
       guard await VaultStore.unlock(onError: raise) else { return }
-      guard let value = VaultStore.open(entry) else {
-        raise("Couldn't read that entry.")
-        return
-      }
+      guard let value = VaultStore.open(entry, onError: raise) else { return }
       onClose()
       Paster.type(value)
     }
@@ -421,10 +444,7 @@ struct VaultView: View {
     }
     Task {
       guard await VaultStore.unlock(onError: raise) else { return }
-      guard let value = VaultStore.open(entry) else {
-        raise("Couldn't read that entry.")
-        return
-      }
+      guard let value = VaultStore.open(entry, onError: raise) else { return }
       revealed[entry.id] = value
     }
   }
@@ -432,7 +452,8 @@ struct VaultView: View {
   private func edit(_ entry: VaultRow) {
     Task {
       guard await VaultStore.unlock(onError: raise) else { return }
-      guard let value = VaultStore.open(entry), let name = entry.name else {
+      guard let value = VaultStore.open(entry, onError: raise) else { return }
+      guard let name = entry.name else {
         raise("Couldn't read that entry.")
         return
       }
@@ -467,10 +488,7 @@ struct VaultView: View {
   private func copyAnyway(_ entry: VaultRow) {
     Task {
       guard await VaultStore.unlock(onError: raise) else { return }
-      guard let value = VaultStore.open(entry) else {
-        raise("Couldn't read that entry.")
-        return
-      }
+      guard let value = VaultStore.open(entry, onError: raise) else { return }
 
       let pasteboard = NSPasteboard.general
       let cleared = pasteboard.clearContents()
@@ -541,6 +559,14 @@ struct VaultEditor: View {
           .controlSize(.small)
       }
       .textFieldStyle(.roundedBorder)
+
+      // New entries only. An edit is already-stored data and the person has seen
+      // this once; repeating it on every save is the nag this feature must not be.
+      if draft.entryID == nil {
+        Text("This is sealed to this Mac and cannot be read anywhere else. Export the vault from Settings if you want a copy that survives losing it.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
 
       if let error {
         Text(error).font(.caption).foregroundStyle(.red)

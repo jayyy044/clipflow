@@ -120,6 +120,35 @@ enum VaultSelfCheck {
       (scalar("PRAGMA secure_delete") ?? 0) != 0
     }
 
+    // 5. The `.keyLost` branch, which had never executed before this assertion
+    //    existed and was otherwise only reachable by four manual GUI steps.
+    //
+    //    A key file that has gone missing while `vault_entries` still has rows
+    //    in it means those rows can never be opened again. Minting a
+    //    replacement raises no Touch ID sheet — wrapping only needs the Enclave
+    //    key's public half — so an Unlock would report success, and the
+    //    overwrite would be the last chance anyone had of noticing. Hence both
+    //    halves below: it must throw, *and* no key blob may appear on disk.
+    //    Throwing after minting would still be a silent overwrite.
+    //
+    //    Runs last because it deletes the key the probe in assertion 0 created,
+    //    and reuses the vault entry assertion 3 inserted.
+    check("a missing key file over a non-empty vault throws keyLost and mints nothing") {
+      guard (VaultRepository.count() ?? 0) > 0 else { return false }
+      guard !keyFiles().isEmpty else { return false }
+      for file in keyFiles() {
+        try FileManager.default.removeItem(at: Database.directory.appending(path: file))
+      }
+
+      do {
+        _ = try VaultKeys.nameKey()
+        return false  // returned a key rather than refusing
+      } catch VaultKeys.Failure.keyLost {
+        // The required outcome. Anything else propagates and reports as a throw.
+      }
+      return keyFiles().isEmpty
+    }
+
     // GAP — assertion 5 of the design's self-check, deliberately absent:
     //   "Export then import under a different pair of device keys reproduces
     //    the same names and values, and a wrong passphrase fails cleanly."
@@ -131,6 +160,14 @@ enum VaultSelfCheck {
 
     print(failures == 0 ? "\nvault self-check passed" : "\nvault self-check FAILED (\(failures))")
     exit(failures == 0 ? 0 : 1)
+  }
+
+  /// The vault key blobs sitting in the scratch data directory. Named by suffix
+  /// rather than spelled out, so a third key file added later is deleted — and
+  /// noticed if it reappears — by the assertion above without editing it.
+  private static func keyFiles() -> [String] {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: Database.directory.path)) ?? []
+    return names.filter { $0.hasSuffix(".key") }
   }
 
   /// Nil means the read failed, which every caller treats as a failed assertion

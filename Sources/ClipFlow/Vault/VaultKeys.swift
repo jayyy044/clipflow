@@ -48,10 +48,19 @@ enum VaultKeys {
   /// callers; it now carries whatever code the underlying Security or
   /// LocalAuthentication error reported, and means "something unclassified went
   /// wrong", which every caller alerts on.
+  ///
+  /// `keyLost` is the one that is permanent: the wrapped key blob is not on disk
+  /// but `vault_entries` has rows in it, so the key those rows were sealed under
+  /// is gone and nothing can open them again. It is separate from
+  /// `keychain(OSStatus)` because that one means "try again later" and this one
+  /// never does, and separate from `userCancelled` because the user did not
+  /// choose it. Callers must say the true thing rather than "couldn't read that
+  /// entry".
   enum Failure: Error {
     case userCancelled
     case unavailable
     case keychain(OSStatus)
+    case keyLost
   }
 
   /// Beside the database, in Application Support. These blobs are useless on any
@@ -126,13 +135,23 @@ enum VaultKeys {
     FileManager.default.fileExists(atPath: Database.directory.appending(path: valueFile).path)
   }
 
-  /// Loads the wrapped master key if it is there, otherwise generates one.
+  /// Loads the wrapped master key if it is there, otherwise generates one — but
+  /// only on genuine first use, see below.
   ///
   /// Lazy rather than at launch, as before: a user who never opens the vault
   /// never gets a key file, and the value key's creation is also the moment the
   /// ACL is attached. Generation itself never prompts — wrapping uses the
   /// Enclave key's *public* half — so the first Touch ID sheet a user sees is
   /// the first time they unlock, not the moment they create the vault.
+  ///
+  /// That last property is exactly why a missing key file cannot be allowed to
+  /// mint silently: creating the Enclave key and wrapping under its public half
+  /// both succeed with no prompt, so with the file gone (a partial restore, a
+  /// Migration Assistant run, anyone tidying Application Support) an Unlock
+  /// would raise no sheet at all, report success, and then fail to open every
+  /// existing row with a generic error. The file's absence is the whole
+  /// difference between authenticated and not, so it is only treated as first
+  /// use when the vault is genuinely empty.
   private static func masterKey(file: String, control: SecAccessControl) throws -> SymmetricKey {
     guard SecureEnclave.isAvailable else {
       NSLog("ClipFlow: no Secure Enclave on this Mac — the vault cannot be opened here")
@@ -142,6 +161,32 @@ enum VaultKeys {
     let url = Database.directory.appending(path: file)
     if let blob = FileManager.default.contents(atPath: url.path) {
       return try unwrap(blob)
+    }
+
+    // No key file. The count below decides whether this is first use, so it has
+    // to be a count of the real database: when `Database.shared` fell back to
+    // its in-memory queue the user's vault is untouched on disk and entirely
+    // invisible, and `count()` answers a truthful zero about a database that
+    // holds nothing. Minting on that zero is the silent overwrite this whole
+    // guard exists to prevent, so an unreadable vault is not an empty one.
+    //
+    // Transient, not `.keyLost`: the disk may be fine on the next launch and
+    // nothing has been lost yet.
+    guard !Database.isEphemeral else {
+      NSLog("ClipFlow: vault key file is missing and the database is the in-memory fallback — not minting a key")
+      throw Failure.keychain(errSecIO)
+    }
+
+    // `count()` is nil for a *failed* read, never zero for one, so an unknown
+    // answer refuses to mint too — it just reports as the transient error it
+    // might be, rather than as permanent loss.
+    guard let entries = VaultRepository.count() else {
+      NSLog("ClipFlow: vault key file is missing and the entry count could not be read — not minting a key")
+      throw Failure.keychain(errSecIO)
+    }
+    guard entries == 0 else {
+      NSLog("ClipFlow: vault key file is missing while \(entries) entries exist — those entries cannot be opened again")
+      throw Failure.keyLost
     }
 
     try? FileManager.default.createDirectory(at: Database.directory, withIntermediateDirectories: true)

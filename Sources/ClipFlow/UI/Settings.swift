@@ -263,6 +263,9 @@ private struct VaultSettings: View {
   /// gets a lot of guesses per second.
   @State private var useOwnPassphrase = false
   @State private var notice: String?
+  /// Both flows run Touch ID, 600k PBKDF2 iterations and a modal panel. Without
+  /// this a second click starts a second export on top of the first.
+  @State private var busy = false
 
   var body: some View {
     Form {
@@ -281,13 +284,22 @@ private struct VaultSettings: View {
           : "ClipFlow generates a recovery key and shows it once. Write it down — without it the file cannot be opened, by you or by anyone.")
           .font(.caption)
           .foregroundStyle(.secondary)
-        Button("Export Vault…", action: exportVault)
+        Button("Export Vault…") { Task { @MainActor in await exportVault() } }
+          .disabled(busy)
       } header: {
         Text("Export")
+      } footer: {
+        // The other half of the section above. That one says what an export costs;
+        // without this one, nobody reading it ever makes the file, and the vault's
+        // keys do not leave this Mac.
+        Text("An export is also the only backup. Vault entries are sealed to this Mac and cannot be recovered from a backup of the app's files, so erasing, repairing or replacing it leaves nothing to restore from except a file you exported first.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
 
       Section {
-        Button("Import Vault…", action: importVault)
+        Button("Import Vault…") { Task { @MainActor in await importVault() } }
+          .disabled(busy)
       } header: {
         Text("Import")
       } footer: {
@@ -305,25 +317,124 @@ private struct VaultSettings: View {
     .formStyle(.grouped)
   }
 
-  /// TODO(unit-c): unlock the session, then — when `useOwnPassphrase` is off —
-  /// generate a recovery key, show it grouped for transcription, and require an
-  /// explicit acknowledgement that it was written down *before* the save panel
-  /// opens. Nothing outside this view enforces that, and an unacknowledged key is
-  /// an export nobody can ever open. Then `NSSavePanel`, default filename
-  /// `clipflow-vault-<yyyy-MM-dd>.clipflowvault`.
-  private func exportVault() {
-    notice = "Export isn't wired up in this build yet."
+  /// Unlock (export reads every secret), then the key, then the panel. The
+  /// acknowledgement is collected *before* the file exists: nothing outside this
+  /// view enforces it, and an unacknowledged key is an export nobody can ever
+  /// open.
+  @MainActor
+  private func exportVault() async {
+    notice = nil
+    busy = true
+    defer { busy = false }
+    do {
+      try await VaultSession.shared.unlock()
+
+      let passphrase: String
+      if useOwnPassphrase {
+        guard let typed = askSecret(
+          title: "Choose a passphrase for this export",
+          message: "This is the only thing protecting the file. At least \(VaultTransfer.minimumPassphraseLength) characters, and there is no way to recover it.",
+          confirm: "Continue"
+        ) else { return }
+        // Checked here rather than left to `makeFile` only so the user is not
+        // asked where to save a file that was never going to be written.
+        guard typed.count >= VaultTransfer.minimumPassphraseLength else {
+          notice = VaultTransfer.Failure.passphraseTooShort.localizedDescription
+          return
+        }
+        passphrase = typed
+      } else {
+        passphrase = try VaultTransfer.generateRecoveryKey()
+        guard acknowledgeRecoveryKey(passphrase) else {
+          notice = "Export cancelled. No file was written."
+          return
+        }
+      }
+
+      let panel = NSSavePanel()
+      panel.nameFieldStringValue = VaultTransfer.defaultFilename()
+      if let type = UTType(filenameExtension: VaultTransfer.fileExtension) {
+        panel.allowedContentTypes = [type]
+      }
+      guard panel.runModal() == .OK, let url = panel.url else { return }
+
+      let data = try await VaultTransfer.export(passphrase: passphrase)
+      try data.write(to: url, options: .atomic)
+      notice = "Exported to \(url.lastPathComponent)."
+    } catch {
+      // Every throw on this path ends up here. A failure that left the button
+      // looking like it worked would be the same defect the dead stub was.
+      notice = error.localizedDescription
+    }
   }
 
-  /// TODO(unit-c): `NSOpenPanel`, then ask for the key or passphrase and hand the
-  /// raw string straight through — do **not** validate its shape here. The
-  /// transfer layer already folds transcription variants (case, dashes, spaces,
-  /// and the Crockford 0/O and 1/I/L confusions) back to canonical form, and a
-  /// length or grouping check written against a remembered example is how a UI
-  /// ends up rejecting every valid key. A failed unseal means "wrong key" and the
-  /// UI says exactly that and nothing more.
-  private func importVault() {
-    notice = "Import isn't wired up in this build yet."
+  /// The file, then the key, then Touch ID. The raw string goes straight through
+  /// — no shape check here on purpose: `VaultTransfer` already folds case,
+  /// dashes, spaces and the Crockford 0/O and 1/I/L confusions, and a length or
+  /// grouping rule written against a remembered example is how a UI ends up
+  /// rejecting every valid key. Merging is `VaultTransfer`'s job, not this one's.
+  @MainActor
+  private func importVault() async {
+    notice = nil
+    busy = true
+    defer { busy = false }
+    do {
+      let panel = NSOpenPanel()
+      panel.allowsMultipleSelection = false
+      panel.canChooseDirectories = false
+      if let type = UTType(filenameExtension: VaultTransfer.fileExtension) {
+        panel.allowedContentTypes = [type]
+      }
+      panel.prompt = "Import"
+      guard panel.runModal() == .OK, let url = panel.url else { return }
+      let data = try Data(contentsOf: url)
+
+      guard let passphrase = askSecret(
+        title: "Enter the recovery key or passphrase",
+        message: "For a recovery key, capitals, dashes and spaces do not matter.",
+        confirm: "Import"
+      ) else { return }
+
+      try await VaultSession.shared.unlock()
+      let result = try await VaultTransfer.importFile(data, passphrase: passphrase)
+      notice = "Imported \(result.imported), skipped \(result.skipped) already in your vault."
+    } catch {
+      notice = error.localizedDescription
+    }
+  }
+
+  /// One secure field in a modal alert. Returns the raw string, untrimmed and
+  /// unvalidated; nil means the user cancelled.
+  @MainActor
+  private func askSecret(title: String, message: String, confirm: String) -> String? {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = message
+    alert.addButton(withTitle: confirm)
+    alert.addButton(withTitle: "Cancel")
+    let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+    alert.accessoryView = field
+    alert.window.initialFirstResponder = field
+    guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+    return field.stringValue
+  }
+
+  /// Shown once, before anything is written. No "copy to clipboard" button: this
+  /// is a clipboard manager, and the one place a recovery key must not land is
+  /// the history it would be captured into.
+  @MainActor
+  private func acknowledgeRecoveryKey(_ key: String) -> Bool {
+    let alert = NSAlert()
+    alert.messageText = "Write down your recovery key"
+    alert.informativeText = "It is shown once and stored nowhere. Without it the export cannot be opened, by you or by anyone. No file is written until you confirm."
+    let field = NSTextField(labelWithString: key)
+    field.font = .monospacedSystemFont(ofSize: 15, weight: .semibold)
+    field.isSelectable = true
+    field.sizeToFit()
+    alert.accessoryView = field
+    alert.addButton(withTitle: "I wrote it down")
+    alert.addButton(withTitle: "Cancel")
+    return alert.runModal() == .alertFirstButtonReturn
   }
 }
 

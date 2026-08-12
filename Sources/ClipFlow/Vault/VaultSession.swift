@@ -71,6 +71,20 @@ final class VaultSession: ObservableObject {
   private var key: SymmetricKey?
   private var idleTimer: Timer?
 
+  /// Bumped by every `lock()`. An `unlock()` that started before the bump throws
+  /// its result away instead of installing it: the screen can lock, or the panel
+  /// can be closed from the status menu, while the Touch ID sheet is still up,
+  /// and both of those fire `lock()` into a session that has no key yet. Without
+  /// this the lock is a no-op — `lock()` returns early on `key == nil` — and the
+  /// awaiting `unlock()` then installs the key anyway, leaving it in memory
+  /// until the idle timeout with nothing on screen.
+  private var generation = 0
+
+  /// The unlock in flight, so two callers share one Touch ID sheet rather than
+  /// stacking two. Cleared when it finishes and by `lock()`, so a cancelled
+  /// sheet is never replayed to the next caller.
+  private var unlocking: Task<SymmetricKey, Error>?
+
   private init() {
     // Same observer as `PasteboardMonitor.observeSleepAndLock()`:
     // `com.apple.screenIsLocked` is undocumented but stable and is the only
@@ -94,9 +108,20 @@ final class VaultSession: ObservableObject {
   /// can front every vault action with this and get exactly one prompt.
   func unlock() async throws {
     guard key == nil else { return touch() }
-    let unwrapped = try await Task.detached(priority: .userInitiated) {
+    let started = generation
+    let task = unlocking ?? Task.detached(priority: .userInitiated) {
       try VaultKeys.valueKey()
-    }.value
+    }
+    unlocking = task
+    // No lock is held across the await — this is a hop on the main actor, and
+    // `lock()` is free to run in the gap. That is the case being handled.
+    defer { if unlocking == task { unlocking = nil } }
+    let unwrapped = try await task.value
+    // Locked while the sheet was up. The key is dropped on the floor rather
+    // than installed, and the user unlocks again. Reported as a cancellation
+    // because that is the one failure callers dismiss without an alert, and
+    // returning normally would tell them the vault is open when it is not.
+    guard generation == started else { throw VaultKeys.Failure.userCancelled }
     key = unwrapped
     isUnlocked = true
     touch()
@@ -112,6 +137,10 @@ final class VaultSession: ObservableObject {
   func lock() {
     idleTimer?.invalidate()
     idleTimer = nil
+    // Before the early return, so a lock that arrives while a sheet is up still
+    // counts: that unlock discards its key instead of installing it.
+    generation &+= 1
+    unlocking = nil
     guard key != nil else { return }
     key = nil
     isUnlocked = false
@@ -138,8 +167,13 @@ final class VaultSession: ObservableObject {
   private func touch() {
     idleTimer?.invalidate()
     guard key != nil else { return }
-    idleTimer = Timer.scheduledTimer(withTimeInterval: Self.idleTimeout, repeats: false) { _ in
+    // `.common`, not `.default`: `Timer.scheduledTimer` adds to `.default`
+    // only, so menu tracking or a modal loop would defer the lock for as long
+    // as it ran. Same reason and same spelling as `PasteboardMonitor.start()`.
+    let timer = Timer(timeInterval: Self.idleTimeout, repeats: false) { _ in
       Task { @MainActor in VaultSession.shared.lock() }
     }
+    RunLoop.main.add(timer, forMode: .common)
+    idleTimer = timer
   }
 }
