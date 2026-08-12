@@ -609,7 +609,14 @@ struct HistoryView: View {
       // The highlight has to be the row's full width minus a small inset, the way
       // a menu's is. The plain style's default insets are built for a settings
       // list and leave the fill floating in the middle of the row.
-      .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+      //
+      // Zero on every edge, and the vertical pt that used to live here moved into
+      // the row's own padding so the height is unchanged. AppKit draws its
+      // context-menu ring (`NSMenuHighlightView`) around the whole row rect and
+      // cannot be told not to — see the research note. An inset here is the gap
+      // between our fill and that ring, which is what makes it read as a second
+      // box rather than an edge on the first one.
+      .listRowInsets(EdgeInsets())
       // Single click, not double: picking a clipboard entry is the whole point
       // of the panel being open, so there is nothing else a click would mean.
       // contentShape makes the blank space in the row clickable too.
@@ -773,7 +780,10 @@ struct ItemRow: View {
         .foregroundStyle(.secondary)
         .fixedSize()
     }
-    .padding(.vertical, 5)
+    // 6, not 5: the extra pt is the `listRowInsets` this row used to carry, moved
+    // inside the fill so the fill reaches the row's edge without the row changing
+    // height.
+    .padding(.vertical, 6)
     .padding(.horizontal, 8)
     // The fill has to span the row, not shrink to the content, or the highlight
     // stops short of the timestamp on rows with a narrow thumbnail.
