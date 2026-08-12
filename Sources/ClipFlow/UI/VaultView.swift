@@ -463,26 +463,21 @@ struct VaultView: View {
     .listRowSeparator(.hidden)
     .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
     .contentShape(.rect)
-    // Not `.contextMenu`, for the reason spelled out on `rightClickMenu`: the
-    // system outlines whichever view presents the menu, and on a list row that
-    // ring is a second highlight.
-    .rightClickMenu {
-      var actions: [MenuAction] = []
+    .contextMenu {
       if entry.name != nil {
-        actions.append(MenuAction("Use") { use(entry) })
-        actions.append(MenuAction(revealed[entry.id] == nil ? "Reveal" : "Hide") { toggleReveal(entry) })
-        actions.append(.separator)
-        actions.append(MenuAction("Edit") { edit(entry) })
+        Button("Use") { use(entry) }
+        Button(revealed[entry.id] == nil ? "Reveal" : "Hide") { toggleReveal(entry) }
+        Divider()
+        Button("Edit") { edit(entry) }
         // Deliberately last before the destructive action: this is the one route
         // that puts a vault value somewhere every other app on the machine can
         // read it. The label is short, the behaviour is not — `copyAnyway` still
         // marks the pasteboard concealed and wipes it after 60 seconds, and the
         // notice it raises says so.
-        actions.append(MenuAction("Copy") { copyAnyway(entry) })
-        actions.append(.separator)
+        Button("Copy") { copyAnyway(entry) }
+        Divider()
       }
-      actions.append(MenuAction("Delete") { delete(entry) })
-      return actions
+      Button("Delete", role: .destructive) { delete(entry) }
     }
   }
 
