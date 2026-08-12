@@ -52,9 +52,14 @@ bundle:
 	# Nested code first: the bundle signature seals whatever is inside it, so
 	# signing the app before the helper invalidates the app's own signature the
 	# moment the helper is signed.
-	# `--options runtime` plus an entitlements file that grants nothing: without
-	# them a local signature carries get-task-allow, and anything running as you
-	# can attach and read the vault key out of memory.
+	# `--options runtime` plus an entitlements file that grants nothing, so that
+	# anything running as you cannot attach and read the vault key out of memory.
+	#
+	# Not because the old signature carried get-task-allow — it did not, and an
+	# earlier version of this comment was wrong about that. Command-line codesign
+	# never injects that entitlement; that is Xcode's Debug configuration. The
+	# hardened runtime flag on its own is what denies the attach, measured against
+	# an otherwise identical unhardened binary that lldb does attach to.
 	codesign --force --sign "$(SIGN_ID)" --options runtime \
 	  --entitlements Resources/ClipFlow.entitlements $(APP)/Contents/MacOS/ClipFlowOCR
 	codesign --force --sign "$(SIGN_ID)" --options runtime \
