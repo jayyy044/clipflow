@@ -635,7 +635,7 @@ struct HistoryView: View {
         // `ImageStore`, which the vault design puts out of scope — and an entry
         // that silently moved nothing would be worse than no menu item.
         if item.kind == .text {
-          Button("Move to Vault…") { moveToVault(item) }
+          Button("Move to Vault") { moveToVault(item) }
         }
         Divider()
         Button("Delete", role: .destructive) { delete(item.id) }
