@@ -619,26 +619,29 @@ struct HistoryView: View {
       // mouse user would look for it anyway.
       .onTapGesture { paste(item.id, plainText: false) }
       // Discoverable counterpart to Option+Delete, and the only route for
-      // anyone using the mouse.
-      .contextMenu {
-        Button("Paste") { paste(item.id, plainText: false) }
-        Button("Paste as Plain Text") { paste(item.id, plainText: true) }
+      // anyone using the mouse. Not `.contextMenu` — see `rightClickMenu`.
+      .rightClickMenu(onOpen: { selection = item.id }) {
+        var actions = [
+          MenuAction("Paste") { paste(item.id, plainText: false) },
+          MenuAction("Paste as Plain Text") { paste(item.id, plainText: true) },
+        ]
         // Absent, not disabled, on rows without a link: the glyph already says
         // which rows have one, and a permanently greyed entry on most rows is
         // noise. Same reasoning as the status menu's "Enable Pasting…".
         if item.hasURL {
-          Button("Open URL") { openURL(item.id) }
+          actions.append(MenuAction("Open URL") { openURL(item.id) })
         }
-        Divider()
-        Button(item.pinned ? "Unpin" : "Pin") { togglePin(item.id) }
+        actions.append(.separator)
+        actions.append(MenuAction(item.pinned ? "Unpin" : "Pin") { togglePin(item.id) })
         // Text only. An image would need a parallel encrypted path through
         // `ImageStore`, which the vault design puts out of scope — and an entry
         // that silently moved nothing would be worse than no menu item.
         if item.kind == .text {
-          Button("Move to Vault…") { moveToVault(item) }
+          actions.append(MenuAction("Move to Vault") { moveToVault(item) })
         }
-        Divider()
-        Button("Delete", role: .destructive) { delete(item.id) }
+        actions.append(.separator)
+        actions.append(MenuAction("Delete") { delete(item.id) })
+        return actions
       }
   }
 
@@ -806,6 +809,120 @@ struct ItemRow: View {
     return date.formatted(
       .relative(presentation: .numeric, unitsStyle: .narrow).locale(.autoupdatingCurrent)
     )
+  }
+}
+
+/// One entry in a `rightClickMenu`. A nil handler is a separator.
+struct MenuAction {
+  let title: String
+  let handler: (() -> Void)?
+
+  init(_ title: String, handler: @escaping () -> Void) {
+    self.title = title
+    self.handler = handler
+  }
+
+  private init() {
+    title = ""
+    handler = nil
+  }
+
+  static let separator = MenuAction()
+}
+
+extension View {
+  /// `.contextMenu` without its side effect.
+  ///
+  /// macOS outlines whichever view presented an `NSMenu` — the context-menu
+  /// source highlight — and on a list row that ring lands *outside* the row's own
+  /// accent capsule, so a selected row wore two highlights. It is not SwiftUI's
+  /// focus ring: `.focusEffectDisabled()` on the row does not remove it
+  /// (measured), and SwiftUI exposes no modifier that does. Presenting the menu
+  /// from an AppKit view of our own is what leaves nothing for the system to
+  /// outline.
+  ///
+  /// `items` is evaluated at click time, so a title that depends on state
+  /// (Pin/Unpin, Reveal/Hide) is read from the last render rather than the first.
+  func rightClickMenu(
+    onOpen: (() -> Void)? = nil,
+    items: @escaping () -> [MenuAction]
+  ) -> some View {
+    background(RightClickMenu(onOpen: onOpen, items: items))
+  }
+}
+
+private struct RightClickMenu: NSViewRepresentable {
+  let onOpen: (() -> Void)?
+  let items: () -> [MenuAction]
+
+  func makeNSView(context: Context) -> Catcher { Catcher() }
+
+  func updateNSView(_ view: Catcher, context: Context) {
+    view.onOpen = onOpen
+    view.items = items
+  }
+
+  /// A bare `NSView` has no intrinsic size, and the catcher has to cover the
+  /// whole row or the right-click lands outside it. Spelled out rather than left
+  /// to whatever SwiftUI infers from an empty view.
+  func sizeThatFits(_ proposal: ProposedViewSize, nsView: Catcher, context: Context) -> CGSize? {
+    CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+  }
+
+  final class Catcher: NSView {
+    var onOpen: (() -> Void)?
+    var items: () -> [MenuAction] = { [] }
+
+    /// Claims the two gestures that open a menu and nothing else. Without this
+    /// the view would swallow the row's ordinary click and hover — it sits under
+    /// the whole row, and it is the only real `NSView` there.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+      guard let event = NSApp.currentEvent, Self.opensMenu(event) else { return nil }
+      return super.hitTest(point)
+    }
+
+    override func rightMouseDown(with event: NSEvent) { present(event) }
+
+    /// Control-click is the same gesture and arrives as a left click.
+    override func mouseDown(with event: NSEvent) { present(event) }
+
+    private static func opensMenu(_ event: NSEvent) -> Bool {
+      switch event.type {
+      case .rightMouseDown: return true
+      case .leftMouseDown: return event.modifierFlags.contains(.control)
+      default: return false
+      }
+    }
+
+    private func present(_ event: NSEvent) {
+      onOpen?()
+      let menu = NSMenu()
+      // Nothing here implements `validateMenuItem:`, and leaving auto-enabling on
+      // makes each item's state depend on how AppKit reads a target that doesn't.
+      menu.autoenablesItems = false
+      for action in items() {
+        guard let handler = action.handler else {
+          menu.addItem(.separator())
+          continue
+        }
+        let item = NSMenuItem(title: action.title, action: #selector(fire(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = Box(handler)
+        menu.addItem(item)
+      }
+      menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
+    }
+
+    @objc private func fire(_ sender: NSMenuItem) {
+      (sender.representedObject as? Box)?.run()
+    }
+
+    /// `representedObject` is `Any?` but has to survive the Objective-C round
+    /// trip, so the closure travels in an object rather than as itself.
+    private final class Box: NSObject {
+      let run: () -> Void
+      init(_ run: @escaping () -> Void) { self.run = run }
+    }
   }
 }
 
