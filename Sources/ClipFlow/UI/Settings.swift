@@ -81,7 +81,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
   func show() {
     if window == nil {
       let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 480, height: 560),
+        // Matches `SettingsView`'s own frame. The window is not resizable, so a
+        // smaller rect here would clip the view rather than shrink it.
+        contentRect: NSRect(x: 0, y: 0, width: 640, height: 560),
         styleMask: [.titled, .closable],
         backing: .buffered,
         defer: false
@@ -119,7 +121,11 @@ struct SettingsView: View {
     // Taller than it was: the Shortcuts tab now lists the seven fixed panel keys
     // on top of the ten recorders, and at 470 the pin slots were already cut off
     // mid-list with no hint there was more below.
-    .frame(width: 480, height: 560)
+    //
+    // Wider than it was for a different reason: four tabs do not fit a 480pt bar
+    // (less 28pt of padding), so macOS collapsed the last of them behind a `>>`
+    // overflow menu. `SettingsWindow` has to carry the same number.
+    .frame(width: 640, height: 560)
   }
 }
 

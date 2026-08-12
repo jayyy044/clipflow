@@ -393,14 +393,10 @@ struct VaultView: View {
         .font(.system(size: 26))
         .foregroundStyle(.tertiary)
       Text("Nothing in the vault yet").foregroundStyle(.secondary)
-      Text("Add an entry, or right-click something in your history and move it here.")
-        .font(.caption)
-        .foregroundStyle(.tertiary)
-        .multilineTextAlignment(.center)
-      // The one thing the design cannot recover from, said once, where the first
-      // entry is about to be added. No dialog: the keys are bound to this Mac's
-      // Secure Enclave and an export made beforehand is the only way back.
-      Text("Entries are locked to this Mac. If it is erased, repaired or replaced, an export made beforehand is the only way to get them back — Settings › Vault.")
+      // One line. The device-bound warning lives in Settings › Vault and nowhere
+      // else — repeating it on an empty screen is a wall of text in front of a
+      // feature nobody has used yet.
+      Text("Add an entry, or move one over from your history.")
         .font(.caption)
         .foregroundStyle(.tertiary)
         .multilineTextAlignment(.center)
@@ -472,11 +468,13 @@ struct VaultView: View {
         Button("Use") { use(entry) }
         Button(revealed[entry.id] == nil ? "Reveal" : "Hide") { toggleReveal(entry) }
         Divider()
-        Button("Rename or Edit…") { edit(entry) }
-        // Deliberately last before the destructive action and deliberately
-        // wordy: this is the one route that puts a vault value somewhere every
-        // other app on the machine can read it.
-        Button("Copy anyway (clipboard clears in 60s)") { copyAnyway(entry) }
+        Button("Edit") { edit(entry) }
+        // Deliberately last before the destructive action: this is the one route
+        // that puts a vault value somewhere every other app on the machine can
+        // read it. The label is short, the behaviour is not — `copyAnyway` still
+        // marks the pasteboard concealed and wipes it after 60 seconds, and the
+        // notice it raises says so.
+        Button("Copy") { copyAnyway(entry) }
         Divider()
       }
       Button("Delete", role: .destructive) { delete(entry) }
@@ -612,25 +610,21 @@ struct VaultEditor: View {
       // Not a Form: a grouped form inside a 360pt sheet spends most of its width
       // on inset chrome, and there are two fields.
       VStack(alignment: .leading, spacing: 8) {
-        TextField("Name — shown even when the vault is locked", text: $name)
+        TextField("Name", text: $name)
+          .textFieldStyle(.roundedBorder)
         // Masked by default. The toggle is there because a value you cannot see
         // is a value you cannot check before saving it.
-        if showValue {
-          TextField("Value", text: $value)
-        } else {
-          SecureField("Value", text: $value)
-        }
+        //
+        // Not `SecureField`: macOS hangs credential AutoFill off a secure field
+        // and floats a "Passwords…" button over it, covering the rest of the
+        // sheet. Both states go through the same AppKit field so flipping the
+        // toggle does not swap bezel styles mid-sheet.
+        VaultValueField(text: $value, isSecure: !showValue, onSubmit: save)
+          // `makeNSView` picks the class, so the view has to be rebuilt — not
+          // just updated — when the toggle flips.
+          .id(showValue)
         Toggle("Show value", isOn: $showValue)
           .controlSize(.small)
-      }
-      .textFieldStyle(.roundedBorder)
-
-      // New entries only. An edit is already-stored data and the person has seen
-      // this once; repeating it on every save is the nag this feature must not be.
-      if draft.entryID == nil {
-        Text("This is sealed to this Mac and cannot be read anywhere else. Export the vault from Settings if you want a copy that survives losing it.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
       }
 
       if let error {
@@ -641,14 +635,114 @@ struct VaultEditor: View {
         Spacer()
         Button("Cancel", role: .cancel) { dismiss() }
           .keyboardShortcut(.cancelAction)
-        Button("Save") {
-          error = onSave(name, value)
-          if error == nil { dismiss() }
-        }
-        .keyboardShortcut(.defaultAction)
+        Button("Save", action: save)
+          .keyboardShortcut(.defaultAction)
       }
     }
     .padding(16)
     .frame(width: 380)
+    // Same material and same corner radius as the panel underneath it
+    // (`HistoryView`). The clear presentation background is what stops the sheet
+    // painting an opaque rectangle behind the glass, exactly as `Panel` has to
+    // clear the window's.
+    .liquidGlass(in: .rect(cornerRadius: 12))
+    .presentationBackground(.clear)
+  }
+
+  private func save() {
+    error = onSave(name, value)
+    if error == nil { dismiss() }
+  }
+}
+
+/// The vault's value field, in AppKit, for one reason: `SecureField` gets macOS
+/// credential AutoFill attached to it and a "Passwords…" button floats over the
+/// sheet.
+///
+/// The content type was the obvious suspect and it is not the mechanism: an
+/// `NSSecureTextField` comes out of `init()` with `contentType` already nil, so
+/// `.textContentType(nil)` and its AppKit equivalent are both no-ops — measured,
+/// not assumed. What AppKit actually gates the button on is a per-field flag,
+/// `_isPasswordAutofillEnabled`, which reads `true` on a fresh field and is
+/// writable through `_setPasswordAutofillEnabled:`. There is no public spelling
+/// of it; `responds(to:)` guards the call, so a macOS that drops the selector
+/// gets the AutoFill button back rather than a crash.
+///
+/// Still an `NSSecureTextField` when masked, deliberately: that class is what
+/// takes secure event input, which is what keeps a bank PIN out of every
+/// keylogger on the machine. So this does **not** change whatever secure-input
+/// behaviour `Paster.type` was running into — the only thing here that helps is
+/// `dismantleNSView` giving up first responder on the way out, which is what
+/// makes AppKit drop kernel secure mode before the sheet's window goes away.
+struct VaultValueField: NSViewRepresentable {
+  /// Private, hence the `responds(to:)` guard at the call site.
+  private static let disableAutoFill = NSSelectorFromString("_setPasswordAutofillEnabled:")
+
+  @Binding var text: String
+  let isSecure: Bool
+  let onSubmit: () -> Void
+
+  func makeNSView(context: Context) -> NSTextField {
+    let field = isSecure ? NSSecureTextField() : NSTextField()
+    field.delegate = context.coordinator
+    field.placeholderString = "Value"
+    field.bezelStyle = .roundedBezel
+    field.isBezeled = true
+    field.usesSingleLineMode = true
+    field.cell?.wraps = false
+    field.cell?.isScrollable = true
+    field.font = .preferredFont(forTextStyle: .body)
+    // The point of the whole type.
+    if field.responds(to: Self.disableAutoFill), let imp = field.method(for: Self.disableAutoFill) {
+      typealias Setter = @convention(c) (AnyObject, Selector, ObjCBool) -> Void
+      unsafeBitCast(imp, to: Setter.self)(field, Self.disableAutoFill, false)
+    }
+    field.isAutomaticTextCompletionEnabled = false
+    field.stringValue = text
+    // Without these the field sizes to its intrinsic width and stops short of
+    // the sheet's edge.
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    return field
+  }
+
+  func updateNSView(_ field: NSTextField, context: Context) {
+    context.coordinator.onSubmit = onSubmit
+    // Guarded: assigning `stringValue` while the user is typing resets the
+    // insertion point to the end.
+    if field.stringValue != text { field.stringValue = text }
+  }
+
+  static func dismantleNSView(_ field: NSTextField, coordinator: Coordinator) {
+    guard field.window?.firstResponder === field.currentEditor() else { return }
+    field.window?.makeFirstResponder(nil)
+  }
+
+  func makeCoordinator() -> Coordinator { Coordinator(text: $text, onSubmit: onSubmit) }
+
+  final class Coordinator: NSObject, NSTextFieldDelegate {
+    private let text: Binding<String>
+    var onSubmit: () -> Void
+
+    init(text: Binding<String>, onSubmit: @escaping () -> Void) {
+      self.text = text
+      self.onSubmit = onSubmit
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+      guard let field = notification.object as? NSTextField else { return }
+      text.wrappedValue = field.stringValue
+    }
+
+    /// Return saves, the way it did while this was a `SecureField` and SwiftUI's
+    /// default button caught it. An AppKit field consumes the key itself, so
+    /// without this the sheet's Save button becomes mouse-only. Escape is left
+    /// alone so it keeps reaching the Cancel button.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+      guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+      text.wrappedValue = control.stringValue
+      onSubmit()
+      return true
+    }
   }
 }

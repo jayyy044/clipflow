@@ -134,10 +134,17 @@ enum VaultKeys {
   /// and it hops off first. One prompt per unlock, not per entry: the session
   /// caches what comes back.
   static func valueKey() throws -> SymmetricKey {
+    // `.privateKeyUsage` is not optional here and its absence is not a subtlety:
+    // `.userPresence` alone says *who* may use the key and never grants the use,
+    // so every agreement threw LocalAuthentication -1009, "Operation is not
+    // allowed". That failure was read as the Enclave enforcing the gate. It was
+    // the Enclave refusing an operation the ACL had never permitted, which looks
+    // identical from the outside if the only thing checked is that it failed —
+    // and it is why this vault shipped with no working authentication at all.
     guard let control = SecAccessControlCreateWithFlags(
       nil,
       kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-      .userPresence,
+      [.privateKeyUsage, .userPresence],
       nil
     ) else {
       // No enrolled biometry *and* no password credential, or a policy that
@@ -263,7 +270,15 @@ enum VaultKeys {
       throw Failure.keychain(errSecDecode)
     }
     do {
-      let enclaveKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: stored.sepKey)
+      // Supplies the sentence macOS puts in its own authentication sheet, and
+      // nothing else. This is NOT the `evaluatePolicy` gate V-3 forbids: nothing
+      // here asks whether the user authenticated and then decides. The Enclave
+      // still refuses the agreement on its own, and without a reason string the
+      // system has no wording to draw a sheet with.
+      let context = LAContext()
+      context.localizedReason = "unlock your ClipFlow vault"
+      let enclaveKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(
+        dataRepresentation: stored.sepKey, authenticationContext: context)
       let ephemeral = try P256.KeyAgreement.PublicKey(x963Representation: stored.ephemeralPublicKey)
       let shared = try enclaveKey.sharedSecretFromKeyAgreement(with: ephemeral)
       let sealed = try AES.GCM.SealedBox(combined: stored.wrappedMasterKey)
