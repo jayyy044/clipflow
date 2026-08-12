@@ -152,10 +152,26 @@ enum VaultTransfer {
     return out
   }
 
-  /// Separators a transcribed key is plausibly written with. Anything else — a
-  /// comma, an apostrophe, a colon — is a character a passphrase chose, not a
-  /// gap between groups.
-  private static let separators: Set<Unicode.Scalar> = [" ", "-"]
+  /// Separators a transcribed key is plausibly written with — deliberately wider
+  /// than the space and ASCII hyphen it was written with, because the key comes
+  /// back through software that rewrites both.
+  ///
+  /// Forgiven on purpose, each one observed as a real paste:
+  ///   - any Unicode whitespace: the non-breaking space a PDF or an email client
+  ///     substitutes, a tab from a column-pasted text file, and the newline a
+  ///     copied line carries on the end.
+  ///   - any dash punctuation: `-` itself, plus the en- and em-dashes that a
+  ///     smart-substitution editor turns `-` into (U+2013, U+2014).
+  ///   - `.`: the separator people reach for when re-typing a grouped key.
+  ///
+  /// Anything else — a comma, an apostrophe, a colon, an underscore — is a
+  /// character a passphrase chose, not a gap between groups, and one of them
+  /// makes `canonical` hand the whole string back untouched.
+  private static func isSeparator(_ scalar: Unicode.Scalar) -> Bool {
+    scalar == "."
+      || scalar.properties.isWhitespace
+      || scalar.properties.generalCategory == .dashPunctuation
+  }
 
   /// Folds a transcribed recovery key back to the exact characters it was
   /// derived from — case, dashes, spaces and the 0/O, 1/I/L confusions all
@@ -181,7 +197,7 @@ enum VaultTransfer {
     var folded = ""
     for scalar in passphrase.uppercased().unicodeScalars {
       switch scalar {
-      case _ where separators.contains(scalar): continue
+      case _ where isSeparator(scalar): continue
       case "O": folded.append("0")
       case "I", "L": folded.append("1")
       default:

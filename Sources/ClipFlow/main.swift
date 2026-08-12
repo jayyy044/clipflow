@@ -149,12 +149,87 @@ enum VaultSelfCheck {
       return keyFiles().isEmpty
     }
 
-    // GAP — assertion 5 of the design's self-check, deliberately absent:
-    //   "Export then import under a different pair of device keys reproduces
-    //    the same names and values, and a wrong passphrase fails cleanly."
-    // `VaultTransfer` (Unit C) does not exist at the time of writing, so there
-    // is nothing to call. Add it here when it lands; do not consider the
-    // self-check complete until then.
+    // 6. Assertion 5 of the design's self-check: the file format, on its own.
+    //    `makeFile`/`readFile` are split out of `export`/`importFile` precisely
+    //    so this can run with no Keychain, no Secure Enclave and no database
+    //    anywhere near it — which is also why it still runs after assertion 5
+    //    above has deleted the key blobs.
+    //
+    //    "Under a different pair of device keys" is exactly what a file that
+    //    carries no device key means: there is nothing in the bytes below that
+    //    this machine's keys could have contributed.
+    let entries = [
+      VaultTransfer.Entry(name: "self-check ünïcode 🔐", value: "4111-1111-1111-1111", createdAt: now),
+      // An empty value and a zero date, because `readFile` decodes JSON and both
+      // are the shapes a hand-rolled encoder drops.
+      VaultTransfer.Entry(name: "second", value: "", createdAt: 0),
+    ]
+    // Punctuation on purpose: `!` is not in the Crockford alphabet, so this is
+    // a passphrase `canonical()` must hand back untouched (see assertion 9).
+    let typed = "My!Secret!Passphrase!2026Zk9q"
+
+    check("makeFile then readFile round-trips names, values and dates") {
+      let file = try blocking { try await VaultTransfer.makeFile(entries: entries, passphrase: typed) }
+      return try blocking { try await VaultTransfer.readFile(file, passphrase: typed) } == entries
+    }
+
+    check("a wrong passphrase fails cleanly rather than returning anything") {
+      let file = try blocking { try await VaultTransfer.makeFile(entries: entries, passphrase: typed) }
+      do {
+        _ = try blocking { try await VaultTransfer.readFile(file, passphrase: typed + "x") }
+        return false  // opened a file it had no key for
+      } catch VaultTransfer.Failure.wrongPassphrase {
+        return true
+      }
+      // Any other error propagates and reports as a throw: a wrong guess must
+      // not be distinguishable from a wrong guess of a different shape.
+    }
+
+    // 7 & 8. The `canonical()` property, from both sides. A recovery key comes
+    //        back off paper, out of a PDF or through an editor with smart
+    //        substitution, and every one of those variations has to open the
+    //        file — reporting "Wrong passphrase." to someone restoring their
+    //        only backup is the most expensive lie this app can tell.
+    check("a transcribed recovery key opens its file through case, dash, space and 0/O folding") {
+      let key = try VaultTransfer.generateRecoveryKey()
+      let file = try blocking { try await VaultTransfer.makeFile(entries: entries, passphrase: key) }
+      let variations = [
+        key.lowercased(),
+        key.replacingOccurrences(of: "-", with: ""),
+        key.replacingOccurrences(of: "-", with: " "),
+        // Smart substitution, a PDF's non-breaking space, a column paste, and
+        // the newline a copied line brings with it.
+        key.replacingOccurrences(of: "-", with: "\u{2013}"),
+        key.replacingOccurrences(of: "-", with: "\u{2014}"),
+        key.replacingOccurrences(of: "-", with: "\u{00A0}"),
+        key.replacingOccurrences(of: "-", with: "\t"),
+        key.replacingOccurrences(of: "-", with: "."),
+        "  \(key.lowercased())\n",
+        // Crockford's own point: what is written down as O and l came off a
+        // screen showing 0 and 1.
+        key.replacingOccurrences(of: "0", with: "O").replacingOccurrences(of: "1", with: "l"),
+      ]
+      for variation in variations {
+        let opened = try blocking { try await VaultTransfer.readFile(file, passphrase: variation) }
+        guard opened == entries else { return false }
+      }
+      return true
+    }
+
+    check("a passphrase with other characters is not folded — its case and spacing still matter") {
+      let file = try blocking { try await VaultTransfer.makeFile(entries: entries, passphrase: typed) }
+      // 26 alphanumerics, so the old count-the-survivors version folded this and
+      // every variation of it opened the same file.
+      for variation in [typed.lowercased(), typed.replacingOccurrences(of: "!", with: "")] {
+        do {
+          _ = try blocking { try await VaultTransfer.readFile(file, passphrase: variation) }
+          return false  // folded a passphrase that was never key-shaped
+        } catch VaultTransfer.Failure.wrongPassphrase {
+          continue
+        }
+      }
+      return true
+    }
 
     try? FileManager.default.removeItem(at: scratch)
 
@@ -168,6 +243,32 @@ enum VaultSelfCheck {
   private static func keyFiles() -> [String] {
     let names = (try? FileManager.default.contentsOfDirectory(atPath: Database.directory.path)) ?? []
     return names.filter { $0.hasSuffix(".key") }
+  }
+
+  /// Runs an async call from the synchronous self-check and blocks until it is
+  /// done. There is no run loop yet — this executes before `NSApplication` —
+  /// so there is nothing to spin and nothing to starve: the work goes to a
+  /// detached task on the cooperative pool and this thread waits on it.
+  /// `makeFile` and `readFile` are the only async things asserted here and
+  /// neither is actor-isolated, so nothing it needs is behind this thread.
+  private final class Outcome<T>: @unchecked Sendable {
+    var result: Result<T, Error>?
+  }
+
+  private static func blocking<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
+    let outcome = Outcome<T>()
+    let semaphore = DispatchSemaphore(value: 0)
+    Task.detached(priority: .userInitiated) {
+      do {
+        outcome.result = .success(try await body())
+      } catch {
+        outcome.result = .failure(error)
+      }
+      semaphore.signal()
+    }
+    semaphore.wait()
+    // Set before `signal()` on the only other thread that touches it.
+    return try outcome.result!.get()
   }
 
   /// Nil means the read failed, which every caller treats as a failed assertion

@@ -54,11 +54,36 @@ enum VaultStore {
     case failed(String)
   }
 
-  /// Nil means the read failed, following `VaultRepository.all()`'s rule — an
-  /// unreadable vault must never be drawn as an empty one.
-  static func rows() -> [VaultRow]? {
-    guard let entries = VaultRepository.all(), let key = try? VaultKeys.nameKey() else { return nil }
-    return entries.compactMap { entry -> VaultRow? in
+  /// What a read of the list can come back with. Three cases and not an
+  /// optional, because "the vault could not be read" and "the key those entries
+  /// were sealed under is gone" need opposite sentences on screen: one is fixed
+  /// by reopening the app and the other is never fixed at all. Collapsing them
+  /// told a user whose vault was permanently unrecoverable that nothing had
+  /// been lost.
+  enum Contents {
+    case rows([VaultRow])
+    /// Transient. The database or the Enclave would not answer this time.
+    case unreadable
+    /// Permanent. `VaultKeys.Failure.keyLost`.
+    case keyLost
+  }
+
+  /// Never returns an empty list for a failed read, following
+  /// `VaultRepository.all()`'s rule — an unreadable vault must never be drawn
+  /// as an empty one.
+  static func read() -> Contents {
+    let key: SymmetricKey
+    do {
+      key = try VaultKeys.nameKey()
+    } catch VaultKeys.Failure.keyLost {
+      // Deliberately not swallowed by `try?`. This is the only signal the app
+      // ever gets that the entries are gone for good.
+      return .keyLost
+    } catch {
+      return .unreadable
+    }
+    guard let entries = VaultRepository.all() else { return .unreadable }
+    return .rows(entries.compactMap { entry -> VaultRow? in
       // A row with no id cannot be acted on; GRDB fills it in on insert, so this
       // is unreachable in practice and silently dropping it beats a crash.
       guard let id = entry.id else { return nil }
@@ -79,7 +104,7 @@ enum VaultStore {
       case (_?, nil): return true
       case (nil, nil): return left.id < right.id
       }
-    }
+    })
   }
 
   /// Nil after reporting why, and never a plaintext-shaped placeholder.
@@ -107,9 +132,15 @@ enum VaultStore {
     guard !name.isEmpty else { return .failed("Give this entry a name.") }
     guard !value.isEmpty else { return .failed("There is nothing to save.") }
 
-    guard let nameKey = try? VaultKeys.nameKey(),
-          let sealedName = try? VaultCrypto.seal(name, using: nameKey)
-    else { return .failed("Couldn't reach the vault's keys.") }
+    let sealedName: Data
+    do {
+      sealedName = try VaultCrypto.seal(name, using: VaultKeys.nameKey())
+    } catch {
+      // `localizedDescription` and not a fixed sentence: `keyLost` reaching
+      // here has to say the permanent thing, and every other case already
+      // carries its own wording.
+      return .failed(error.localizedDescription)
+    }
 
     guard let sealedValue = try? VaultSession.shared.seal(value) else {
       return .failed("The vault locked before this was saved. Unlock and try again.")
@@ -159,8 +190,11 @@ enum VaultStore {
       return true
     } catch VaultKeys.Failure.userCancelled {
       return false
-    } catch VaultKeys.Failure.unavailable {
-      onError("macOS wouldn't unlock the vault — Touch ID or a login password has to be set up.")
+    } catch let failure as VaultKeys.Failure {
+      // Each case says its own true thing — including `keyLost`, which the
+      // old catch-all reported as "Couldn't unlock the vault", a retry the
+      // user could repeat forever.
+      onError(failure.localizedDescription)
       return false
     } catch {
       onError("Couldn't unlock the vault.")
@@ -196,8 +230,9 @@ struct VaultView: View {
   var onExit: () -> Void
 
   @ObservedObject private var session = VaultSession.shared
-  /// Nil means the read failed. Distinct from `[]`, which is an empty vault.
-  @State private var rows: [VaultRow]?
+  /// Three-state. `.rows([])` is an empty vault; the other two are failures and
+  /// are worded very differently. Nil only until the first read lands.
+  @State private var contents: VaultStore.Contents?
   /// Values the user asked to see, cleared whenever the session locks.
   @State private var revealed: [Int64: String] = [:]
   @State private var draft: VaultDraft?
@@ -299,27 +334,57 @@ struct VaultView: View {
 
   @ViewBuilder
   private var content: some View {
-    if let rows {
-      if rows.isEmpty {
-        empty
-      } else {
-        list(rows)
-      }
-    } else {
-      // Never "your vault is empty" — that is a sentence the user acts on.
-      VStack(spacing: 6) {
-        Image(systemName: "exclamationmark.triangle")
-          .font(.system(size: 26))
-          .foregroundStyle(.tertiary)
-        Text("Couldn't read the vault").foregroundStyle(.secondary)
-        Text("Nothing has been lost. Quit and reopen ClipFlow, then try again.")
-          .font(.caption)
-          .foregroundStyle(.tertiary)
-          .multilineTextAlignment(.center)
-      }
-      .padding(.horizontal, 24)
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    switch contents {
+    case .rows(let rows) where rows.isEmpty:
+      empty
+    case .rows(let rows):
+      list(rows)
+    case .keyLost:
+      keyLost
+    // Never "your vault is empty" — that is a sentence the user acts on. Nil is
+    // drawn the same way: the read has not landed yet and claiming either
+    // outcome would be a guess.
+    case .unreadable, nil:
+      message(
+        icon: "exclamationmark.triangle",
+        title: "Couldn't read the vault",
+        detail: "Nothing has been lost. Quit and reopen ClipFlow, then try again."
+      )
     }
+  }
+
+  /// The permanent one, and the only place in the app that says it. No retry,
+  /// no "try again later", no softening: the key those rows were sealed under is
+  /// not on this Mac any more, so nothing — not this app, not a reinstall, not
+  /// Apple — can open them. An export made before the loss is the only route
+  /// back, and saying anything gentler would keep someone pressing Unlock.
+  private var keyLost: some View {
+    message(
+      icon: "exclamationmark.triangle.fill",
+      title: "These entries can't be opened again",
+      detail: """
+        The key this Mac sealed them with is gone. Nothing can unseal them now, \
+        and reopening ClipFlow will not bring it back.
+
+        If you exported the vault to a file earlier, importing it in \
+        Settings › Vault is the only way to get these entries back.
+        """
+    )
+  }
+
+  private func message(icon: String, title: String, detail: String) -> some View {
+    VStack(spacing: 6) {
+      Image(systemName: icon)
+        .font(.system(size: 26))
+        .foregroundStyle(.tertiary)
+      Text(title).foregroundStyle(.secondary)
+      Text(detail)
+        .font(.caption)
+        .foregroundStyle(.tertiary)
+        .multilineTextAlignment(.center)
+    }
+    .padding(.horizontal, 24)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
   private var empty: some View {
@@ -419,7 +484,7 @@ struct VaultView: View {
   }
 
   private func reload() {
-    rows = VaultStore.rows()
+    contents = VaultStore.read()
   }
 
   private func raise(_ message: String) {

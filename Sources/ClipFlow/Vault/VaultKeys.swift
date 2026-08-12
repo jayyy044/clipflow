@@ -56,11 +56,33 @@ enum VaultKeys {
   /// never does, and separate from `userCancelled` because the user did not
   /// choose it. Callers must say the true thing rather than "couldn't read that
   /// entry".
-  enum Failure: Error {
+  enum Failure: LocalizedError {
     case userCancelled
     case unavailable
     case keychain(OSStatus)
     case keyLost
+
+    /// `LocalizedError` because every caller reaches for `localizedDescription`,
+    /// and a bare `Error` renders that as `The operation couldn't be completed.
+    /// (ClipFlow.VaultKeys.Failure error 1.)` — which is what the most common
+    /// non-happy path in the vault, pressing Cancel on the Touch ID sheet, used
+    /// to put in front of the user.
+    ///
+    /// `.keychain`'s status code is deliberately not in the sentence: it is in
+    /// the log lines above, and a number nobody can act on only makes the
+    /// advice that follows it look less trustworthy.
+    var errorDescription: String? {
+      switch self {
+      case .userCancelled:
+        "Unlocking was cancelled. The vault is still locked."
+      case .unavailable:
+        "macOS wouldn't unlock the vault — Touch ID or a login password has to be set up."
+      case .keychain:
+        "Couldn't reach the vault's keys. Nothing has been lost — quit and reopen ClipFlow, then try again."
+      case .keyLost:
+        "The key this Mac sealed your vault entries with is gone, so those entries cannot be opened again. A vault export made earlier is the only way to get them back."
+      }
+    }
   }
 
   /// Beside the database, in Application Support. These blobs are useless on any

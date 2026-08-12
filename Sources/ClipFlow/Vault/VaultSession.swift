@@ -18,7 +18,10 @@ extension Notification.Name {
 /// edited in the database file fails to open rather than decrypting to garbage,
 /// and callers get `Failure.corrupt` to draw as a corrupt entry.
 enum VaultCrypto {
-  enum Failure: Error {
+  /// `LocalizedError` for the same reason `VaultKeys.Failure` is: callers show
+  /// `localizedDescription`, and the default for a bare `Error` is Swift's debug
+  /// rendering with an enum case number in it.
+  enum Failure: LocalizedError {
     /// The session was locked, or was never unlocked. Not an error to report —
     /// the caller unlocks and retries.
     case locked
@@ -26,6 +29,13 @@ enum VaultCrypto {
     /// render this as empty text: an entry that silently reads as blank is one
     /// the user deletes as junk.
     case corrupt
+
+    var errorDescription: String? {
+      switch self {
+      case .locked: "The vault locked. Unlock and try again."
+      case .corrupt: "Couldn't read that entry."
+      }
+    }
   }
 
   static func seal(_ value: String, using key: SymmetricKey) throws -> Data {
@@ -68,8 +78,21 @@ final class VaultSession: ObservableObject {
   /// machine is not holding the key all afternoon.
   static let idleTimeout: TimeInterval = 300
 
+  /// The longest the idle countdown may be held off by `suspendIdleTimer()`.
+  /// See that method for why a cap exists at all.
+  static let maximumSuspension: TimeInterval = 300
+
   private var key: SymmetricKey?
   private var idleTimer: Timer?
+
+  /// Outstanding `suspendIdleTimer()` calls. A count rather than a flag so two
+  /// nested modal sheets do not have the inner one's dismissal re-arm the timer
+  /// under the outer one.
+  private var suspensions = 0
+
+  /// The bound on the above. Armed with the first suspension, and it ends the
+  /// suspension outright when it fires.
+  private var suspensionGuard: Timer?
 
   /// Bumped by every `lock()`. An `unlock()` that started before the bump throws
   /// its result away instead of installing it: the screen can lock, or the panel
@@ -137,6 +160,13 @@ final class VaultSession: ObservableObject {
   func lock() {
     idleTimer?.invalidate()
     idleTimer = nil
+    // A suspension never survives a lock. Whatever modal loop was holding the
+    // countdown off, the vault is now closed, and a `resumeIdleTimer()` that
+    // arrives afterwards must not be able to bring anything back — with the
+    // count at zero it returns without touching a thing.
+    suspensions = 0
+    suspensionGuard?.invalidate()
+    suspensionGuard = nil
     // Before the early return, so a lock that arrives while a sheet is up still
     // counts: that unlock discards its key instead of installing it.
     generation &+= 1
@@ -162,10 +192,67 @@ final class VaultSession: ObservableObject {
     return try VaultCrypto.open(sealed, using: key)
   }
 
+  /// Holds the idle countdown off until a matching `resumeIdleTimer()`.
+  ///
+  /// **This exists because of modal run loops, and deleting it re-opens a real
+  /// bug.** The idle timer is scheduled in `.common` so menu tracking cannot
+  /// defer the lock — which also means it fires inside `.modalPanel`, the mode
+  /// `NSAlert.runModal()` and `NSSavePanel.runModal()` spin. The vault could
+  /// therefore auto-lock while the user was still copying their 32-character
+  /// recovery key off a modal alert, and the export that alert belongs to then
+  /// failed after they had already written the key down and pressed OK.
+  ///
+  /// Only the *countdown* is suspended. Screen lock, an explicit `lock()` and
+  /// the panel closing all still lock the vault while suspended — this does not
+  /// make the vault unlockable, it makes the clock stop.
+  ///
+  /// Nesting is counted, and calling it twice is safe. It is also bounded: an
+  /// unbalanced call would otherwise leave an unlocked vault that never idles
+  /// out, which is precisely the state the idle timer exists to prevent, so
+  /// `maximumSuspension` ends it regardless of who forgot to resume.
+  func suspendIdleTimer() {
+    suspensions += 1
+    idleTimer?.invalidate()
+    idleTimer = nil
+    guard suspensionGuard == nil else { return }
+    let guardTimer = Timer(timeInterval: Self.maximumSuspension, repeats: false) { _ in
+      Task { @MainActor in VaultSession.shared.endSuspension() }
+    }
+    RunLoop.main.add(guardTimer, forMode: .common)
+    suspensionGuard = guardTimer
+  }
+
+  /// Balances one `suspendIdleTimer()`. The last one re-arms a **full fresh**
+  /// interval rather than the remainder: the modal was in front of the user, so
+  /// the time it was up was not idle time, and resuming with a few seconds left
+  /// would lock the vault immediately after they dismissed it.
+  ///
+  /// Extra calls are ignored, so an unbalanced resume cannot drive the count
+  /// negative and disable a later suspension.
+  func resumeIdleTimer() {
+    guard suspensions > 0 else { return }
+    suspensions -= 1
+    guard suspensions == 0 else { return }
+    endSuspension()
+  }
+
+  private func endSuspension() {
+    suspensions = 0
+    suspensionGuard?.invalidate()
+    suspensionGuard = nil
+    // No-op on a locked session: `touch()` refuses to arm without a key.
+    touch()
+  }
+
   /// Restarts the idle countdown. Called from every operation that touches the
   /// key, so the timeout measures idleness rather than time since unlocking.
   private func touch() {
     idleTimer?.invalidate()
+    idleTimer = nil
+    // Suspended: the countdown stays stopped, and `resumeIdleTimer()` is what
+    // starts it again. Vault work done while a modal is up still must not
+    // re-arm behind the suspension's back.
+    guard suspensions == 0 else { return }
     guard key != nil else { return }
     // `.common`, not `.default`: `Timer.scheduledTimer` adds to `.default`
     // only, so menu tracking or a modal loop would defer the lock for as long

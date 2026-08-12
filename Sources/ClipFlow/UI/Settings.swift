@@ -267,6 +267,12 @@ private struct VaultSettings: View {
   /// this a second click starts a second export on top of the first.
   @State private var busy = false
 
+  /// Every way out of the generated-key flow before a file exists. It has to say
+  /// the key is dead, not just that nothing was written: the user is holding a
+  /// piece of paper and the next attempt generates a different key.
+  private static let discardedKeyNotice =
+    "Export cancelled. No file was written, and the recovery key you were just shown is not in use — the next export generates a different one."
+
   var body: some View {
     Form {
       Section {
@@ -328,6 +334,16 @@ private struct VaultSettings: View {
     defer { busy = false }
     do {
       try await VaultSession.shared.unlock()
+      // Everything from here to the write is modal, and a `.common` idle timer
+      // fires inside `.modalPanel` run loops — so without this the vault can
+      // lock while the user is copying 32 characters onto paper, and `export`'s
+      // own `isUnlocked` check then refuses, after the key has been shown and
+      // discarded. Suspended *after* `unlock()`, which arms the timer itself.
+      // The `defer` covers every exit: the cancels below, a throw, and the
+      // success path. A suspension that leaked would leave the vault unlocked
+      // with nothing left to close it.
+      VaultSession.shared.suspendIdleTimer()
+      defer { VaultSession.shared.resumeIdleTimer() }
 
       let passphrase: String
       if useOwnPassphrase {
@@ -342,11 +358,24 @@ private struct VaultSettings: View {
           notice = VaultTransfer.Failure.passphraseTooShort.localizedDescription
           return
         }
+        // The generated key gets an acknowledgement step because a key nobody
+        // wrote down is a file nobody can open. A typed passphrase has exactly
+        // the same failure, one typo away, and it surfaces at restore time when
+        // the file is the only copy — so it is typed twice.
+        guard let again = askSecret(
+          title: "Enter the passphrase again",
+          message: "A typo here cannot be spotted later. A file sealed with the wrong passphrase cannot be opened by anyone, including you.",
+          confirm: "Continue"
+        ) else { return }
+        guard again == typed else {
+          notice = "The two passphrases did not match. No file was written."
+          return
+        }
         passphrase = typed
       } else {
         passphrase = try VaultTransfer.generateRecoveryKey()
         guard acknowledgeRecoveryKey(passphrase) else {
-          notice = "Export cancelled. No file was written."
+          notice = Self.discardedKeyNotice
           return
         }
       }
@@ -356,7 +385,13 @@ private struct VaultSettings: View {
       if let type = UTType(filenameExtension: VaultTransfer.fileExtension) {
         panel.allowedContentTypes = [type]
       }
-      guard panel.runModal() == .OK, let url = panel.url else { return }
+      // Silence here was the worst of them: the user has just written down a key
+      // and the window would simply go quiet, leaving nothing to say whether the
+      // key is now live somewhere.
+      guard panel.runModal() == .OK, let url = panel.url else {
+        notice = useOwnPassphrase ? "Export cancelled. No file was written." : Self.discardedKeyNotice
+        return
+      }
 
       let data = try await VaultTransfer.export(passphrase: passphrase)
       try data.write(to: url, options: .atomic)
@@ -379,6 +414,14 @@ private struct VaultSettings: View {
     busy = true
     defer { busy = false }
     do {
+      // Same modal-loop problem as the export. Here the vault may already be
+      // unlocked from an earlier action, and its countdown would run out under
+      // the open panel and the key prompt — costing a second Touch ID sheet at
+      // best and `importFile`'s `.locked` at worst. Suspended before the first
+      // panel; the `defer` resumes on the cancels, on a throw and on success.
+      VaultSession.shared.suspendIdleTimer()
+      defer { VaultSession.shared.resumeIdleTimer() }
+
       let panel = NSOpenPanel()
       panel.allowsMultipleSelection = false
       panel.canChooseDirectories = false
