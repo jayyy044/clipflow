@@ -113,6 +113,7 @@ struct SettingsView: View {
       GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
       ShortcutSettings().tabItem { Label("Shortcuts", systemImage: "keyboard") }
       ExclusionSettings().tabItem { Label("Excluded Apps", systemImage: "hand.raised") }
+      VaultSettings().tabItem { Label("Vault", systemImage: "lock") }
     }
     .padding(14)
     // Taller than it was: the Shortcuts tab now lists the seven fixed panel keys
@@ -203,6 +204,7 @@ private struct ShortcutSettings: View {
     ("⌥P", "Pin or unpin the selected item"),
     ("⌥⌫", "Delete the selected item"),
     ("⌘O", "Open a link in the selected item"),
+    ("⌥V", "Open the vault"),
     ("⎋", "Close the window"),
   ]
 
@@ -246,6 +248,82 @@ private struct ShortcutSettings: View {
       }
     }
     .formStyle(.grouped)
+  }
+}
+
+/// Vault export and import. In Settings and nowhere else, deliberately: the panel
+/// is one keystroke from normal use, and the export file is the one artifact in
+/// the whole design that is neither device-bound nor Touch ID gated. Whoever has
+/// it and the key has the entire vault, on any machine, forever.
+private struct VaultSettings: View {
+  /// Off by default and phrased as an override, not a peer. A generated key is
+  /// 128 random bits and has nothing to guess; a typed passphrase is worth only
+  /// its own entropy, and the KDF buys less time than it sounds like — 600k
+  /// PBKDF2 iterations measure ~68 ms on this machine, so an offline attacker
+  /// gets a lot of guesses per second.
+  @State private var useOwnPassphrase = false
+  @State private var notice: String?
+
+  var body: some View {
+    Form {
+      Section {
+        Text("An export is every vault entry in one file, encrypted with a key that is not your Mac's. Anyone who gets both the file and the key has your whole vault, on any machine, forever. There is no expiry and no way to revoke it.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+      } header: {
+        Text("Before you export")
+      }
+
+      Section {
+        Toggle("Use my own passphrase instead", isOn: $useOwnPassphrase)
+        Text(useOwnPassphrase
+          ? "Weaker than the generated key unless yours is long and random. Minimum 12 characters."
+          : "ClipFlow generates a recovery key and shows it once. Write it down — without it the file cannot be opened, by you or by anyone.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Button("Export Vault…", action: exportVault)
+      } header: {
+        Text("Export")
+      }
+
+      Section {
+        Button("Import Vault…", action: importVault)
+      } header: {
+        Text("Import")
+      } footer: {
+        Text("Merges into what is already here. Nothing is replaced or deleted, and a wrong key fails without touching your vault.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      if let notice {
+        Section {
+          Text(notice).font(.caption).foregroundStyle(.secondary)
+        }
+      }
+    }
+    .formStyle(.grouped)
+  }
+
+  /// TODO(unit-c): unlock the session, then — when `useOwnPassphrase` is off —
+  /// generate a recovery key, show it grouped for transcription, and require an
+  /// explicit acknowledgement that it was written down *before* the save panel
+  /// opens. Nothing outside this view enforces that, and an unacknowledged key is
+  /// an export nobody can ever open. Then `NSSavePanel`, default filename
+  /// `clipflow-vault-<yyyy-MM-dd>.clipflowvault`.
+  private func exportVault() {
+    notice = "Export isn't wired up in this build yet."
+  }
+
+  /// TODO(unit-c): `NSOpenPanel`, then ask for the key or passphrase and hand the
+  /// raw string straight through — do **not** validate its shape here. The
+  /// transfer layer already folds transcription variants (case, dashes, spaces,
+  /// and the Crockford 0/O and 1/I/L confusions) back to canonical form, and a
+  /// length or grouping check written against a remembered example is how a UI
+  /// ends up rejecting every valid key. A failed unseal means "wrong key" and the
+  /// UI says exactly that and nothing more.
+  private func importVault() {
+    notice = "Import isn't wired up in this build yet."
   }
 }
 

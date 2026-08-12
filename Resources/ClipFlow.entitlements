@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Deliberately empty. The point of this file is what it does NOT grant:
+     without it, codesign hands a locally-signed build
+     com.apple.security.get-task-allow, and any process running as you can
+     task_for_pid the app and read the vault key straight out of memory.
+     Add an entitlement here only when a build or launch failure proves it is
+     needed — never speculatively. -->
+<dict/>
+</plist>

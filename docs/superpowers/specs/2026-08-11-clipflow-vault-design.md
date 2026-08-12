@@ -37,12 +37,12 @@ number, a recovery code.
 
 | # | Decision | Why |
 |---|---|---|
-| V-1 | Two Keychain keys: name key with no access control, value key with `.userPresence` | Locked vault shows real entry names; DB file alone still shows nothing readable |
+| V-1 | Two keys: name key with no access control, value key with `.userPresence` | Locked vault shows real entry names; DB file alone still shows nothing readable |
 | V-2 | Separate `vault_entries` table, never a flag on `items` | FTS triggers at `Database.swift:299-321` would index secrets in plaintext |
-| V-3 | Auth is the Keychain ACL, never an `if` on `LAContext` | A boolean return is patchable; `SecItemCopyMatching` failing without the prompt is not |
+| V-3 | Auth is the access control on the key, never an `if` on `LAContext` | A boolean return is patchable; a key agreement the Enclave refuses is not |
 | V-4 | Hardened runtime on the signature | Blocks non-root `task_for_pid`; the single biggest real reduction in memory exposure |
 | V-5 | Vault values are typed, not pasted | The general pasteboard is world-readable; `keyboardSetUnicodeString` skips it entirely |
-| V-6 | No Secure Enclave key in v1 | Only helps a root *snapshot* attacker; most code of the options; fails on pre-T2 Intel |
+| ~~V-6~~ | ~~No Secure Enclave key in v1~~ — **REVERSED 2026-08-11 after measurement**, see Unit A | The Keychain is entitlement-blocked for this build and the legacy fallback silently drops the gate; the Enclave is the only path where `.userPresence` is actually enforced |
 | V-7 | Export is one sealed file, not a zip | ZipCrypto is broken, AES-zip is patchy, and there is nothing to archive |
 | V-8 | Export key derives from a passphrase, never from device keys | Exporting the device key would make the file equivalent to the vault |
 
@@ -69,16 +69,54 @@ New: `Sources/ClipFlow/Vault/VaultKeys.swift`, `Sources/ClipFlow/Vault/VaultSess
 
 ### VaultKeys
 
-Two Keychain generic-password items, both
-`kSecAttrAccessibleWhenUnlockedThisDeviceOnly` — keeps them out of iCloud Keychain and out
+**Corrected 2026-08-11, after measurement. V-6 is REVERSED.** The section below originally
+specified two Keychain generic-password items with `kSecUseDataProtectionKeychain: true`.
+That design does not work on this build, and the obvious fallback is actively dangerous.
+Both were measured on this machine, signed with the real `make bundle` command line:
+
+- **Data-protection keychain:** `SecItemAdd` returns **-34018 `errSecMissingEntitlement`**.
+  The entitlements that would fix it are restricted ones requiring an embedded provisioning
+  profile, which a command-line `codesign` build does not have — adding them SIGKILLs the
+  app at launch. There is no version of Unit A that ships on this path.
+- **Legacy file keychain:** `SecItemAdd` **succeeds**, and `SecItemCopyMatching` then returns
+  the key data **with no authentication prompt at all**. The `.userPresence` access control
+  is accepted and ignored. This is worse than useless: a vault that looks gated and is not.
+  Do not go there under any circumstances.
+
+So the keys are bound to the **Secure Enclave** instead. Measured, same signing, on this
+machine:
+
+- `SecureEnclave.isAvailable` → `true`
+- `SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl:)` creates successfully with an
+  entitlements file that grants nothing
+- `.dataRepresentation` persists to a file and reconstructs in a **separate process run** —
+  re-measured end to end in the envelope format below, `0600`, 669-byte blob, and the master
+  key it unwraps opens a box sealed by the first process. Size varies with the access
+  control: 324 bytes for the name key's `.privateKeyUsage`, 335 in the earlier note
+- a key agreement against a key whose access control is `.userPresence` **fails headless**
+  with `com.apple.LocalAuthentication` **-1009**, "Operation is not allowed" — the gate being
+  ENFORCED
+- the identical flow with `.privateKeyUsage` and no user presence **succeeds**, which is the
+  control proving the line above is the ACL and not a broken call
+
+V-6's original reasoning ("only helps a root snapshot attacker; most code of the options;
+fails on pre-T2 Intel") is superseded on the first two counts — it is now the *only* place
+`.userPresence` is enforced, and it is comparable in size to the Keychain version. The third
+count stands: `SecureEnclave.isAvailable == false` on pre-T2 Intel, and there the vault
+reports `.unavailable` and does not open. That is accepted.
+
+#### Shape
+
+Two Secure Enclave `P256.KeyAgreement` private keys, both
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly` — device-bound, out of iCloud Keychain and out
 of Time Machine.
 
-| account | access control | prompts |
+| key file | access control | prompts |
 |---|---|---|
-| `com.jayyy044.clipflow.vault.name` | none | no |
-| `com.jayyy044.clipflow.vault.value` | `.userPresence` | Touch ID, falls back to Mac password |
+| `vault-name.key` | `.privateKeyUsage` | no |
+| `vault-value.key` | `.userPresence` | Touch ID, falls back to Mac password |
 
-The value key's access control:
+The value key's access control, unchanged from the original spec:
 
 ```swift
 SecAccessControlCreateWithFlags(
@@ -88,12 +126,24 @@ SecAccessControlCreateWithFlags(
   &error)
 ```
 
-Reading it via `SecItemCopyMatching` is what raises the authentication sheet. **There must
-be no code path that decides whether to prompt.** If the key comes back, the user
-authenticated; if it does not, there is no plaintext. That is V-3 and it is the whole
-security model — do not add an `LAContext.evaluatePolicy` gate in front of it.
+Each file holds an ECIES envelope around a 256-bit `SymmetricKey` master key: the Enclave
+key's `.dataRepresentation`, an ephemeral P-256 public key, and the master key sealed under
+`HKDF-SHA256(sharedSecret)` with AES-GCM. Written to the app's Application Support
+directory, beside the database, created `0600`. The blobs are useless without this machine's
+SEP; they are still treated as secrets — never logged, paths never logged at info level.
 
-Keys are `SymmetricKey(size: .bits256)`, generated lazily on first use, stored as raw bytes.
+*Wrapping* uses the Enclave key's **public** half and an ephemeral private key, so creating a
+vault never prompts. *Unwrapping* runs the agreement inside the Enclave against the static
+private key, and **that** is what raises the authentication sheet. **There must be no code
+path that decides whether to prompt.** If the master key comes back, the user authenticated;
+if it does not, there is no plaintext. That is V-3 and it is the whole security model — do
+not add an `LAContext.evaluatePolicy` gate in front of it. `LocalAuthentication` is imported
+in `VaultKeys.swift` for its **error codes only**.
+
+`nameKey()` / `valueKey()` return the unwrapped master key, generated and wrapped lazily on
+first use. One prompt per unlock, not per entry — `VaultSession` caches the result.
+
+The public API is unchanged, which is why Units B, C and D did not have to move:
 
 ```swift
 enum VaultKeys {
@@ -110,8 +160,20 @@ enum VaultKeys {
 }
 ```
 
-`errSecUserCanceled` maps to `.userCancelled` and must be distinguishable by callers: a
-cancelled Touch ID is not an error worth showing an alert for.
+`keychain(OSStatus)` keeps its now-inaccurate name for source compatibility; it carries the
+underlying Security or LocalAuthentication code and means "unclassified failure".
+
+A cancelled sheet maps to `.userCancelled` and must be distinguishable by callers: it is not
+an error worth showing an alert for. `SecureEnclave.isAvailable == false`, and the -1009 an
+ACL that cannot be satisfied reports, map to `.unavailable`. Everything unrecognised falls
+through to `.keychain`, which callers alert on — the safe direction, since silently reading
+an unknown failure as "the user changed their mind" would hide a broken vault.
+
+**Unverified, and it must stay marked so:** which code a *user-cancelled* Touch ID sheet
+actually reports, and whether Escape reports it as cancel or as `authenticationFailed`. That
+needs a GUI session; the collapse of `authenticationFailed` into `.userCancelled`, and the
+log line that compensates for it, are carried over from the original spec on the same
+unverified premise.
 
 ### VaultSession
 
@@ -249,8 +311,16 @@ Run the derivation off the main actor. 600k iterations is deliberately slow.
 
 ### Passphrase
 
-Default to a **generated 128-bit recovery key**, shown grouped for transcription
-(`K7QM-4F2A-9B17-XR3D-88TW-P1LN`), from `SecRandomCopyBytes`. A generated key makes the
+Default to a **generated 128-bit recovery key**, shown grouped for transcription, from
+`SecRandomCopyBytes`.
+
+**Corrected 2026-08-11.** An earlier draft gave `K7QM-4F2A-9B17-XR3D-88TW-P1LN` as the
+example — 24 characters, which is wrong. 128 bits of Crockford base32 is 25.6 characters
+and does not divide into six groups of four. The real shape is **26 characters**, six
+groups of four plus a trailing pair: `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX`. Keeping all 128
+bits beat a tidier line. Any UI must accept 26, and must fold transcription variants back
+to canonical form — case, dashes, spaces, and the Crockford `0`/`O` and `1`/`I`/`L`
+confusions. A generated key makes the
 KDF's strength close to irrelevant because there is nothing to guess. The user may override
 with their own passphrase; if they do, enforce a minimum length and say why in the dialog.
 
@@ -327,8 +397,18 @@ reverse loses the item if the seal fails.
 Edited: `Makefile`
 New: `Resources/ClipFlow.entitlements`
 
-`Makefile:55-56` currently signs with no hardened runtime, so the binary carries
-`get-task-allow` and any process running as you can attach and read its memory. Add:
+`Makefile:55-56` currently signs with no hardened runtime, so any process running as you
+can attach and read its memory.
+
+**Corrected 2026-08-11, after measurement.** An earlier draft of this section claimed the
+build "carries `get-task-allow`". It does not — re-signing a copy with the exact
+pre-change command line returns an empty entitlement dict and `flags=0x0(none)`.
+Command-line `codesign` never injects that entitlement; it is Xcode's Debug-configuration
+behaviour. The gap is solely the absent hardened-runtime flag, and that flag alone is what
+blocks the attach, verified against an unhardened control that *does* let `lldb` in. The
+fix below was right; the reason given for it was not.
+
+Add:
 
 ```make
 codesign --force --sign "$(SIGN_ID)" --options runtime \
@@ -399,6 +479,12 @@ in-memory database and exits with a non-zero status on failure.
 
 Four assertions, the third being the one that matters most:
 
+0. **Added 2026-08-11 with the V-6 reversal.** A Secure Enclave key is created, its blob is
+   written `0600`, and it is reconstructed from that blob in-process and shown to produce the
+   same master key. Run against the *name* key, which has no user-presence ACL, so it needs
+   no sheet and runs headless. This replaces the earlier data-protection-keychain probe,
+   which asserted a path that is now known to return -34018. **The value key's Touch ID path
+   is not asserted and cannot be** — headless it fails with -1009, which is the gate working.
 1. Seal then open round-trips a string.
 2. A tampered sealed blob fails to open — it does not return garbage.
 3. **Inserting a vault entry leaves `items_fts` empty.** This is what catches a future

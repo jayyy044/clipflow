@@ -52,8 +52,13 @@ bundle:
 	# Nested code first: the bundle signature seals whatever is inside it, so
 	# signing the app before the helper invalidates the app's own signature the
 	# moment the helper is signed.
-	codesign --force --sign "$(SIGN_ID)" $(APP)/Contents/MacOS/ClipFlowOCR
-	codesign --force --sign "$(SIGN_ID)" --identifier $(BUNDLE_ID) $(APP)
+	# `--options runtime` plus an entitlements file that grants nothing: without
+	# them a local signature carries get-task-allow, and anything running as you
+	# can attach and read the vault key out of memory.
+	codesign --force --sign "$(SIGN_ID)" --options runtime \
+	  --entitlements Resources/ClipFlow.entitlements $(APP)/Contents/MacOS/ClipFlowOCR
+	codesign --force --sign "$(SIGN_ID)" --options runtime \
+	  --entitlements Resources/ClipFlow.entitlements --identifier $(BUNDLE_ID) $(APP)
 
 run: bundle
 	-pkill -x ClipFlow

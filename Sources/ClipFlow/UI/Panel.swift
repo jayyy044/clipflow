@@ -9,6 +9,71 @@ extension Notification.Name {
   static let clipFlowCaptureStateChanged = Self("clipFlowCaptureStateChanged")
 }
 
+/// Keeps the panel on screen while something that owns the keyboard is up.
+///
+/// The panel closes when it loses key focus — that is what makes it feel like
+/// Spotlight, and it is exactly wrong for the vault: a sheet takes key focus from
+/// its parent window, so presenting one would close the panel and take the sheet
+/// down with it, mid-keystroke, while someone was typing a bank PIN. The Touch ID
+/// prompt does the same thing for the same reason.
+///
+/// A counter rather than a flag, because the two nest: the add sheet is reached
+/// through an unlock, and both hold.
+///
+/// Only `resignKey` consults this. An explicit `close()` — Escape, the status
+/// menu, a pin-slot paste — still closes, deliberately: a stuck counter would
+/// otherwise leave a panel that can never be dismissed, which is worse than a
+/// dismissed sheet. `open(below:)` resets it for the same reason.
+@MainActor
+enum PanelHold {
+  private static var count = 0
+  /// The panel to hand focus back to once the last hold is released. Weak: the
+  /// panel outlives every hold in practice, but nothing here should keep it alive.
+  private(set) static weak var owner: NSWindow?
+
+  static var isHeld: Bool { count > 0 }
+
+  static func acquire() { count += 1 }
+
+  static func release() {
+    count = max(0, count - 1)
+    // The sheet or the prompt took key focus away and `resignKey` deliberately
+    // did nothing about it. Without this the panel stays on screen but deaf.
+    if count == 0 { owner?.makeKey() }
+  }
+
+  static func reset(owner window: NSWindow?) {
+    count = 0
+    owner = window
+  }
+}
+
+extension View {
+  /// `sheet(item:)` that keeps the panel from closing underneath it.
+  ///
+  /// The hold is taken when the binding flips, not in the sheet's `onAppear` —
+  /// AppKit orders the sheet in and the panel resigns key before SwiftUI runs the
+  /// presented view's appearance callbacks, so an `onAppear` hold would arrive
+  /// after the close it was meant to prevent.
+  ///
+  /// `NSApp.activate` is needed too: the panel is non-activating, and an inactive
+  /// app's text field cannot take keyboard input at all.
+  func panelSheet<Item: Identifiable, Sheet: View>(
+    item: Binding<Item?>,
+    @ViewBuilder content: @escaping (Item) -> Sheet
+  ) -> some View {
+    onChange(of: item.wrappedValue != nil) { _, presented in
+      if presented {
+        PanelHold.acquire()
+        NSApp.activate(ignoringOtherApps: true)
+      } else {
+        PanelHold.release()
+      }
+    }
+    .sheet(item: item, content: content)
+  }
+}
+
 /// Spotlight-style floating panel that shows without stealing focus from the app
 /// you were typing in — that app has to stay frontmost so Phase 4 can paste back
 /// into it.
@@ -64,6 +129,9 @@ final class Panel<Content: View>: NSPanel {
     // frontmost app read before anything of ours is on screen. Move this below
     // orderFrontRegardless and paste starts landing in ClipFlow.
     Paster.captureTargetApp()
+    // A hold belongs to one visit. If a sheet ever went away without its release
+    // running, the count would otherwise keep the panel open forever.
+    PanelHold.reset(owner: self)
     // Rows keep whatever relative timestamp they rendered with, because SwiftUI
     // skips re-rendering rows whose data hasn't changed. Announcing the open lets
     // the list re-date itself instead of showing "now" for a minute-old item.
@@ -81,6 +149,12 @@ final class Panel<Content: View>: NSPanel {
 
   override func close() {
     super.close()
+    // The third of `VaultSession`'s three lock triggers, and the one it could not
+    // wire itself: nothing posts a panel-close notification, so the panel says so.
+    // Every route out of the panel funnels through here — Escape, focus loss, the
+    // status menu, a pin-slot paste — so there is no way to leave a vault unlocked
+    // behind a window that is no longer on screen.
+    VaultSession.shared.lock()
     onClose()
   }
 
@@ -120,9 +194,11 @@ final class Panel<Content: View>: NSPanel {
   // Without this the search field can never take keyboard focus.
   override var canBecomeKey: Bool { true }
 
-  // Clicking away closes it, same as Spotlight.
+  // Clicking away closes it, same as Spotlight — unless something the user is
+  // typing into took the focus on purpose (`PanelHold`).
   override func resignKey() {
     super.resignKey()
+    guard !PanelHold.isHeld else { return }
     close()
   }
 }

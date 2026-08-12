@@ -125,6 +125,18 @@ enum Database {
     // whole-journal stall, which matters because we write on every copy.
     var config = Configuration()
     config.journalMode = .wal
+    // Overwrites freed pages with zeroes instead of leaving them readable in the
+    // file. Moving an item out of history and into `vault_entries` would
+    // otherwise leave its plaintext sitting in the freelist of a file that is
+    // backed up and synced.
+    //
+    // Known gap, deliberately not solved here: WAL means deleted content can
+    // still persist in the `-wal` file until a checkpoint. Do not add a
+    // checkpoint-on-delete without measuring what it costs the capture path,
+    // which writes on every copy.
+    config.prepareDatabase { db in
+      try db.execute(sql: "PRAGMA secure_delete=ON")
+    }
 
     let queue = try DatabaseQueue(path: path, configuration: config)
     try migrator.migrate(queue)
@@ -369,6 +381,27 @@ enum Database {
     // only by `Clipboard.copy`, and its text is already in `content`.
     migrator.registerMigration("v8_rtf") { db in
       try db.execute(sql: "ALTER TABLE items ADD COLUMN rtf_data BLOB")
+    }
+
+    // The vault (design V-2). Its own table rather than a flag on `items`,
+    // because the FTS triggers above fire on `items` and would write every
+    // secret into `items_fts` in plaintext — which is the one thing this table
+    // exists to avoid.
+    //
+    // **No FTS trigger and no index here, both on purpose.** Ciphertext is not
+    // tokenizable and not orderable, so an index would only cost writes; the
+    // list sorts in memory after the names decrypt. Adding either would be a
+    // regression, not a fix.
+    //
+    // ponytail: in-memory sort of decrypted names, fine to ~1000 entries
+    migrator.registerMigration("v9_vault") { db in
+      try db.create(table: "vault_entries") { t in
+        t.autoIncrementedPrimaryKey("id")
+        t.column("sealed_name", .blob).notNull()
+        t.column("sealed_value", .blob).notNull()
+        t.column("created_at", .integer).notNull()
+        t.column("updated_at", .integer).notNull()
+      }
     }
 
     return migrator

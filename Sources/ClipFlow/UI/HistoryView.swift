@@ -86,8 +86,41 @@ struct HistoryView: View {
   /// second refusal — the string is identical, so SwiftUI sees no change and the
   /// notice expires ten seconds after the *first* one rather than the latest.
   @State private var noticeToken = 0
+  /// The vault is a mode of this panel, not a window of its own — using an entry
+  /// means typing it into the app you were in, and that plumbing only exists here.
+  @State private var mode = PanelMode.history
+  /// A history row on its way into the vault. Non-nil raises the editor sheet.
+  @State private var vaultDraft: VaultDraft?
 
   var body: some View {
+    Group {
+      if mode == .vault {
+        VaultView(onClose: onClose, onExit: { mode = .history })
+      } else {
+        historyBody
+      }
+    }
+    // Reopening always lands on the history. Attached out here rather than inside
+    // either branch, because the branch that is not on screen is not listening.
+    .onReceive(NotificationCenter.default.publisher(for: .clipFlowPanelDidOpen)) { _ in
+      mode = .history
+    }
+    // Raised from the context menu below. Held open the same way the vault's own
+    // editor is — the panel must not disappear out from under a half-typed secret.
+    .panelSheet(item: $vaultDraft) { draft in
+      VaultEditor(draft: draft) { name, value in
+        switch VaultStore.commit(draft, name: name, value: value) {
+        case .failed(let message):
+          return message
+        case .saved(let warning):
+          if let warning { raise(warning) }
+          return nil
+        }
+      }
+    }
+  }
+
+  private var historyBody: some View {
     VStack(spacing: 0) {
       searchField
       if let notice {
@@ -166,6 +199,13 @@ struct HistoryView: View {
       togglePin(selection)
       return .handled
     }
+    // Option for the same reason Option+P needs it: focus lives in the search
+    // field, so a bare V has to keep typing. Bound here and on the field below.
+    .onKeyPress(keys: ["v"]) { press in
+      guard press.modifiers.contains(.option) else { return .ignored }
+      mode = .vault
+      return .handled
+    }
     .onReceive(NotificationCenter.default.publisher(for: .clipFlowOpenURL)) { _ in
       openSelectedURL()
     }
@@ -214,6 +254,13 @@ struct HistoryView: View {
                 let target = selection ?? history.items.first?.id
           else { return .ignored }
           togglePin(target)
+          return .handled
+        }
+        // Same trap as the two above: the focused field swallows the event before
+        // the panel-level handler sees it.
+        .onKeyPress(keys: ["v"], phases: .down) { press in
+          guard press.modifiers.contains(.option) else { return .ignored }
+          mode = .vault
           return .handled
         }
         // Same trap as the two above, and the reason Option+Delete never worked at
@@ -349,6 +396,32 @@ struct HistoryView: View {
   private func raise(_ message: String) {
     notice = message
     noticeToken += 1
+  }
+
+  /// Moves a history row into the vault: name it, seal it, insert it, and only
+  /// then delete the plaintext row. The ordering lives in `VaultStore.commit` —
+  /// this half is the prompt.
+  ///
+  /// The unlock comes before the sheet rather than after it. Sealing needs the
+  /// value key, so asking afterwards would mean typing a name and then being told
+  /// the thing could not be saved.
+  private func moveToVault(_ item: ItemSummary) {
+    selection = item.id
+    Task {
+      // `ItemSummary` deliberately carries no content — that is what the type is
+      // for — so the full text is fetched here, once, and never logged.
+      guard let content = ItemRepository.item(id: item.id)?.content, !content.isEmpty else {
+        raise("That item's text is gone — there is nothing to move.")
+        return
+      }
+      guard await VaultStore.unlock(onError: raise) else { return }
+      vaultDraft = VaultDraft(
+        title: "Move to Vault",
+        name: VaultStore.suggestedName(from: item.preview),
+        value: content,
+        moveFromItemID: item.id
+      )
+    }
   }
 
   /// FR-5.2's action table for Return, inverted by DECISIONS D-22: every Return
@@ -558,6 +631,12 @@ struct HistoryView: View {
         }
         Divider()
         Button(item.pinned ? "Unpin" : "Pin") { togglePin(item.id) }
+        // Text only. An image would need a parallel encrypted path through
+        // `ImageStore`, which the vault design puts out of scope — and an entry
+        // that silently moved nothing would be worse than no menu item.
+        if item.kind == .text {
+          Button("Move to Vault…") { moveToVault(item) }
+        }
         Divider()
         Button("Delete", role: .destructive) { delete(item.id) }
       }
