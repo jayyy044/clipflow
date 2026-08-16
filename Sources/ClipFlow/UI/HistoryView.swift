@@ -617,6 +617,17 @@ struct HistoryView: View {
       // between our fill and that ring, which is what makes it read as a second
       // box rather than an edge on the first one.
       .listRowInsets(EdgeInsets())
+      // Passing no `selection:` binding was supposed to be enough to stop `List`
+      // drawing a highlight of its own. It is not: the backing `NSTableView` keeps
+      // its own selection state and paints it **over** our content when a row is
+      // clicked, in the same system blue our fill uses. Two blue rectangles of
+      // different sizes, one of them ours, which reads as the row growing on click
+      // rather than as a second highlight.
+      //
+      // Found by stroking our fill red and watching the click paint over the
+      // stroke — an overlay on our own background cannot be covered by anything we
+      // draw, so whatever covered it was AppKit's.
+      .selectionDisabled()
       // Single click, not double: picking a clipboard entry is the whole point
       // of the panel being open, so there is nothing else a click would mean.
       // contentShape makes the blank space in the row clickable too.
@@ -687,6 +698,35 @@ struct ItemRow: View {
   let item: ItemSummary
   let now: Date
   let isSelected: Bool
+
+  /// Where the selection fill sits relative to the row, and how round it is.
+  ///
+  /// All three are knobs rather than constants because they exist to line our
+  /// fill up with something we cannot measure: AppKit draws its context-menu ring
+  /// (`NSMenuHighlightView`) around the whole row rect, including the width
+  /// `List` reserves for its scroller, and offers no way to ask where that is or
+  /// to turn it off. Every value here was read off a screenshot.
+  ///
+  ///     defaults write com.jayyy044.clipflow rowFillTrailingOverhang -float 12
+  ///     defaults write com.jayyy044.clipflow rowFillLeadingOverhang  -float 6
+  ///     defaults write com.jayyy044.clipflow rowFillVerticalOverhang -float 1
+  ///     defaults write com.jayyy044.clipflow rowFillCornerRadius     -float 4
+  ///
+  /// Then quit and reopen. Both overhangs are positive numbers that push the fill
+  /// *out* past the row's edge, towards where the ring is drawn. Too large and
+  /// the fill spills past the ring; too small and the ring reappears outside it.
+  ///
+  /// ponytail: measured constants, not a `GeometryReader` on every row.
+  /// Zero is a legal value — it means square corners, or no overhang — so
+  /// presence of the key decides, not whether it is positive. Reading it as
+  /// `override > 0 ? override : fallback` made 0 fall through to the fallback,
+  /// which is what pushes someone into writing a negative radius to force square
+  /// corners. A negative radius does not square the shape: SwiftUI does not
+  /// reject it, and the path bulges outward past its own frame.
+  private static func knob(_ key: String, _ fallback: CGFloat) -> CGFloat {
+    guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
+    return max(0, UserDefaults.standard.double(forKey: key))
+  }
 
   /// Three styles rather than one. The timestamp, size hint and OCR snippet each
   /// name `.secondary`/`.tertiary` themselves, and grey on accent blue is
@@ -798,8 +838,30 @@ struct ItemRow: View {
       //
       // Accent rather than a hardcoded blue: it follows System Settings ›
       // Appearance, so a non-default accent doesn't leave one stray blue row.
-      RoundedRectangle(cornerRadius: 6)
-        .fill(isSelected ? Color.accentColor : .clear)
+      // `selectedContentBackgroundColor`, not `Color.accentColor`: the latter is
+      // the *control* accent, and AppKit's table selection — which is what the
+      // context-menu ring is drawn to match — uses this one. They are different
+      // shades of blue, which is why our fill and the ring never quite agreed.
+      RoundedRectangle(cornerRadius: Self.knob("rowFillCornerRadius", 0)) //border radius 
+        .fill(isSelected ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
+        .padding(.trailing, -Self.knob("rowFillTrailingOverhang", 15)) // right
+        .padding(.leading, -Self.knob("rowFillLeadingOverhang", 15)) // left 
+        .padding(.vertical, -Self.knob("rowFillVerticalOverhang", 0)) // up and down both at once
+        // Diagnostic, off unless asked for:
+        //   defaults write com.jayyy044.clipflow rowFillDebugOutline -bool YES
+        // Strokes every row's fill, selected or not, so the shape's real bounds
+        // are visible against the row's. Answers "is the fill bigger than the row,
+        // or are the rows simply taller than their content" by looking rather than
+        // by reasoning about SwiftUI's layout.
+        .overlay {
+          if UserDefaults.standard.bool(forKey: "rowFillDebugOutline") {
+            RoundedRectangle(cornerRadius: Self.knob("rowFillCornerRadius", 0))
+              .stroke(Color.red, lineWidth: 1)
+              .padding(.trailing, -Self.knob("rowFillTrailingOverhang", 15))
+              .padding(.leading, -Self.knob("rowFillLeadingOverhang", 15))
+              .padding(.vertical, -Self.knob("rowFillVerticalOverhang", 0))
+          }
+        }
     }
     .contentShape(.rect)
   }
