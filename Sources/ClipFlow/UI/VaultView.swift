@@ -446,7 +446,7 @@ struct VaultView: View {
       } else {
         Button("Use") { use(entry) }
           .controlSize(.small)
-          .help("Types this into the app you were in. Never touches your clipboard.")
+          .help("Types this into the app you were in. Never touches your clipboard — click the row instead to copy it, which does.")
         Button {
           toggleReveal(entry)
         } label: {
@@ -463,6 +463,17 @@ struct VaultView: View {
     .listRowSeparator(.hidden)
     .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
     .contentShape(.rect)
+    // Click copies, the Use button types. Two ways out because they answer
+    // different questions: "type this into what I was doing" and "put it on my
+    // clipboard so I can paste it wherever I like", and only the first can avoid
+    // the pasteboard entirely.
+    //
+    // The panel closes afterwards, so ⌘V lands in the app underneath rather than
+    // in a panel that is still in the way. A corrupt row has no value to copy.
+    .onTapGesture {
+      guard entry.name != nil else { return }
+      copyAnyway(entry, thenClose: true)
+    }
     .contextMenu {
       if entry.name != nil {
         Button("Use") { use(entry) }
@@ -548,7 +559,7 @@ struct VaultView: View {
   /// which disappears the moment the panel closes. It does **not** outlive the
   /// process: quitting inside the minute leaves the value on the pasteboard, and
   /// nothing in this app can fix that from the other side of a `SIGTERM`.
-  private func copyAnyway(_ entry: VaultRow) {
+  private func copyAnyway(_ entry: VaultRow, thenClose: Bool = false) {
     Task {
       guard await VaultStore.unlock(onError: raise) else { return }
       guard let value = VaultStore.open(entry, onError: raise) else { return }
@@ -565,6 +576,11 @@ struct VaultView: View {
 
       let written = pasteboard.changeCount
       raise("Copied. Your clipboard clears in 60 seconds.")
+
+      // Closed *after* the copy, never before: the unlock above raises Touch ID,
+      // and closing the panel takes the authentication sheet down with it. The
+      // wipe below is deliberately detached so it outlives this view.
+      if thenClose { onClose() }
 
       Task {
         try? await Task.sleep(for: .seconds(60))
